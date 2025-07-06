@@ -21,6 +21,7 @@ func Execute() {
 }
 
 func init() {
+	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(forkCmd)
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(listCmd)

@@ -32,6 +32,17 @@ if [ "$WORKLET_ISOLATION" = "full" ]; then
     fi
 fi
 
+# Run init script if provided
+if [ -n "$WORKLET_INIT_SCRIPT" ]; then
+    echo "Running initialization script..."
+    # Use eval to properly handle the script as multiple commands
+    eval "$WORKLET_INIT_SCRIPT"
+    if [ $? -ne 0 ]; then
+        echo "Init script failed" >&2
+        exit 1
+    fi
+fi
+
 # Execute the provided command or shell
 if [ $# -eq 0 ]; then
     exec sh

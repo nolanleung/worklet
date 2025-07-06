@@ -28,6 +28,7 @@ type RunConfig struct {
 	Volumes     []string          `json:"volumes"`
 	Privileged  bool              `json:"privileged"`
 	Isolation   string            `json:"isolation"` // "full" for DinD, "shared" for socket mount (default: "shared")
+	InitScript  []string          `json:"initScript"` // Commands to run on container start
 }
 
 func LoadConfig(dir string) (*WorkletConfig, error) {

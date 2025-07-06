@@ -73,6 +73,13 @@ func RunContainer(workDir string, cfg *config.WorkletConfig) error {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
 	}
 
+	// Add init script if provided
+	if len(cfg.Run.InitScript) > 0 {
+		// Join commands with && to ensure each succeeds
+		initScript := strings.Join(cfg.Run.InitScript, " && ")
+		args = append(args, "-e", fmt.Sprintf("WORKLET_INIT_SCRIPT=%s", initScript))
+	}
+
 	// Add additional volumes
 	for _, volume := range cfg.Run.Volumes {
 		args = append(args, "-v", volume)

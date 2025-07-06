@@ -16,6 +16,9 @@ A powerful tool for creating isolated development environments. Fork your reposi
 # Install worklet
 go install github.com/nolanleung/worklet@latest
 
+# Initialize configuration  
+worklet init
+
 # Fork your current repository
 worklet fork
 
@@ -79,6 +82,9 @@ Forks include the complete `.git` directory, enabling you to:
 ### 🔌 **Self-Contained Binary**
 The worklet binary includes all necessary scripts. No external dependencies beyond Docker.
 
+### 🚀 **Init Scripts**
+Run initialization commands automatically when containers start - perfect for installing dependencies, setting up tools, or configuring the environment.
+
 ## Configuration
 
 Create a `.worklet.jsonc` file in your repository root:
@@ -101,6 +107,11 @@ Create a `.worklet.jsonc` file in your repository root:
     "image": "docker:dind",              // Docker image to use
     "isolation": "full",                 // "full" or "shared"
     "command": ["sh"],                   // Command to run
+    "initScript": [                      // Commands to run on container start
+      "apt-get update",
+      "apt-get install -y nodejs npm",
+      "npm install -g yarn"
+    ],
     "environment": {                     // Environment variables
       "DOCKER_TLS_CERTDIR": "",
       "DOCKER_DRIVER": "overlay2"
@@ -112,6 +123,17 @@ Create a `.worklet.jsonc` file in your repository root:
 ```
 
 ## Commands
+
+### `worklet init`
+Initialize a new `.worklet.jsonc` configuration file.
+
+```bash
+worklet init                    # Create config with defaults
+worklet init --minimal          # Create minimal config
+worklet init --force            # Overwrite existing config
+```
+
+Creates a `.worklet.jsonc` configuration file with sensible defaults.
 
 ### `worklet fork`
 Create a fork of the current repository.
@@ -230,6 +252,39 @@ fork-ghi789     my-project     just now
 $ worklet switch 1  # Test configuration A
 $ worklet switch 2  # Test configuration B
 $ worklet switch 3  # Test configuration C
+```
+
+### Using Init Scripts
+
+Configure automatic dependency installation:
+
+```jsonc
+// .worklet.jsonc
+{
+  "run": {
+    "image": "node:18",
+    "initScript": [
+      "npm install",                    // Install project dependencies
+      "npm install -g typescript",      // Install global tools
+      "npx playwright install"          // Set up test browsers
+    ]
+  }
+}
+```
+
+Now when you run:
+```bash
+$ worklet switch my-fork
+Running initialization script...
+npm install
+✓ Dependencies installed
+npm install -g typescript
+✓ TypeScript installed globally
+npx playwright install
+✓ Playwright browsers installed
+
+# Your environment is ready to use!
+/workspace #
 ```
 
 ## Shell Integration
