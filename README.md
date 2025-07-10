@@ -28,12 +28,8 @@ worklet switch 1
 # You're now in an isolated Docker environment!
 # Make changes, run tests, experiment freely
 
-# When done, exit and commit your changes
-exit
-cd ~/.worklet/forks/fork-*
-git checkout -b feature/tested-change
-git add . && git commit -m "Tested feature"
-git push origin feature/tested-change
+# When done, commit and push your changes with one command
+worklet commit -a -b feature/tested-change -m "Tested feature" --push
 ```
 
 ## Installation
