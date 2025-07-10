@@ -199,6 +199,77 @@ worklet clean --dry-run          # Preview what would be deleted
 worklet clean --force            # Skip confirmation
 ```
 
+### `worklet commit [fork]`
+Commit changes in a worklet fork with Git operations.
+
+```bash
+worklet commit                           # Commit in current fork (interactive)
+worklet commit -m "Fix bug"              # Commit with message
+worklet commit 1 -m "Add feature"        # Commit in fork by index
+worklet commit fork-abc123 -m "Update"   # Commit by fork ID
+worklet commit -a -m "Fix all issues"    # Stage all changes and commit
+worklet commit -b feature/new -m "Add"   # Create branch and commit
+worklet commit -m "Complete" --push      # Commit and push to remote
+```
+
+Options:
+- `-m, --message`: Commit message (prompts if not provided)
+- `-a, --all`: Stage all changes before committing
+- `-b, --branch`: Create and switch to new branch before committing
+- `--push`: Push to remote after committing
+
+Example workflow:
+```bash
+# After testing in a fork
+$ worklet commit -a -b feature/tested -m "Tested feature implementation" --push
+Current git status:
+M  src/app.js
+A  src/newfeature.js
+Staging all changes...
+Creating and switching to branch: feature/tested
+Committing with message: Tested feature implementation
+Pushing to origin/feature/tested...
+Successfully committed changes in fork: /Users/you/.worklet/forks/fork-abc123
+```
+
+### `worklet link <tool>`
+Link external tools to your worklet configuration.
+
+Currently supported tools:
+- `claude`: Links Claude Code authentication
+
+```bash
+worklet link claude             # Link Claude authentication
+worklet link claude --force     # Force overwrite existing mounts
+```
+
+#### Linking Claude Code
+
+The `worklet link claude` command adds a volume mount for your Claude authentication directory to the worklet configuration, allowing you to use Claude Code inside containers.
+
+```bash
+# Link Claude to your worklet
+$ worklet link claude
+Successfully linked Claude authentication to worklet configuration.
+Added volume mount: /Users/you/.claude:/root/.claude:ro
+
+# Now you can use Claude in your containers
+$ worklet switch my-fork
+/workspace # claude --help
+/workspace # claude "explain this code"
+```
+
+This modifies your `.worklet.jsonc` to include:
+```jsonc
+{
+  "run": {
+    "volumes": [
+      "/Users/you/.claude:/root/.claude:ro"
+    ]
+  }
+}
+```
+
 ## Workflows
 
 ### Testing a Risky Change
@@ -219,10 +290,7 @@ Starting Docker daemon in full isolation mode...
 
 # 4. If successful, commit from the fork
 /workspace # exit
-$ cd ~/.worklet/forks/fork-abc123
-$ git add -A
-$ git commit -m "Removed old module, all tests pass"
-$ git push origin feature/remove-old-module
+$ worklet commit -a -b feature/remove-old-module -m "Removed old module, all tests pass" --push
 ```
 
 ### Testing Docker Compose Setups

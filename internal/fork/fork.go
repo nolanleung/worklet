@@ -27,6 +27,7 @@ type FileInfo struct {
 }
 
 type ForkInfo struct {
+	ID          string // Same as SessionID for backward compatibility
 	SessionID   string
 	Name        string
 	Description string
@@ -410,6 +411,7 @@ func ListForks() ([]ForkInfo, error) {
 		}
 
 		forks = append(forks, ForkInfo{
+			ID:          lockFile.SessionID,
 			SessionID:   lockFile.SessionID,
 			Name:        lockFile.Name,
 			Description: lockFile.Description,
@@ -543,4 +545,13 @@ func formatMatches(forks []ForkInfo) string {
 		names = append(names, fmt.Sprintf("%s (%s)", f.Name, f.SessionID))
 	}
 	return strings.Join(names, ", ")
+}
+
+// ResolveFork resolves a fork identifier (index, ID, or name) to a fork path
+func ResolveFork(identifier string) (string, error) {
+	fork, err := FindFork(identifier)
+	if err != nil {
+		return "", err
+	}
+	return fork.Path, nil
 }
