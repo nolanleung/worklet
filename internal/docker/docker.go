@@ -9,14 +9,35 @@ import (
 	"strings"
 
 	"github.com/nolanleung/worklet/internal/config"
+	"github.com/nolanleung/worklet/pkg/proxy"
 )
 
 //go:embed dind-entrypoint.sh
 var dindEntrypointScript string
 
-func RunContainer(workDir string, cfg *config.WorkletConfig) error {
+func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string) error {
 	// Build docker run command
 	args := []string{"run", "--rm", "-it"}
+
+	// Add container name if we have services configured
+	if len(cfg.Services) > 0 {
+		// For now, use the first service name as the container name
+		// In the future, we might want to run multiple containers
+		containerName := fmt.Sprintf("worklet-%s-%s", forkID, cfg.Services[0].Name)
+		args = append(args, "--name", containerName)
+
+		// Add to worklet network
+		args = append(args, "--network", "worklet-network")
+
+		// Expose ports
+		for _, service := range cfg.Services {
+			args = append(args, "-p", fmt.Sprintf("%d:%d", service.Port, service.Port))
+		}
+	}
+
+	// Add worklet fork labels for terminal discovery
+	args = append(args, "--label", "worklet.fork=true")
+	args = append(args, "--label", fmt.Sprintf("worklet.fork.id=%s", forkID))
 
 	// Add working directory mount
 	absWorkDir, err := filepath.Abs(workDir)
@@ -38,10 +59,10 @@ func RunContainer(workDir string, cfg *config.WorkletConfig) error {
 		// Full isolation with Docker-in-Docker
 		// Always need privileged for DinD
 		args = append(args, "--privileged")
-		
+
 		// Set isolation mode environment variable
 		args = append(args, "-e", "WORKLET_ISOLATION=full")
-		
+
 		// Mount the entrypoint script
 		scriptPath, err := getEntrypointScriptPath()
 		if err != nil {
@@ -49,21 +70,21 @@ func RunContainer(workDir string, cfg *config.WorkletConfig) error {
 		}
 		// Ensure cleanup of temp script file
 		defer os.Remove(scriptPath)
-		
+
 		args = append(args, "-v", fmt.Sprintf("%s:/entrypoint.sh:ro", scriptPath))
-		
+
 		// Set entrypoint
 		args = append(args, "--entrypoint", "/entrypoint.sh")
-		
+
 	case "shared":
 		// Shared Docker daemon via socket mount
 		args = append(args, "-v", "/var/run/docker.sock:/var/run/docker.sock")
-		
+
 		// Add privileged flag if specified
 		if cfg.Run.Privileged {
 			args = append(args, "--privileged")
 		}
-		
+
 	default:
 		return fmt.Errorf("invalid isolation mode: %s (must be 'full' or 'shared')", isolation)
 	}
@@ -105,9 +126,53 @@ func RunContainer(workDir string, cfg *config.WorkletConfig) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	// Register with proxy if services are configured
+	var forkMapping *proxy.ForkMapping
+	if len(cfg.Services) > 0 {
+		// Initialize proxy if not already done
+		if err := proxy.InitGlobalProxy(); err != nil {
+			fmt.Printf("Warning: Failed to initialize proxy: %v\n", err)
+		} else {
+			// Convert config services to proxy services
+			var proxyServices []proxy.ServicePort
+			for _, service := range cfg.Services {
+				proxyServices = append(proxyServices, proxy.ServicePort{
+					ServiceName:   service.Name,
+					ContainerPort: service.Port,
+					Subdomain:     service.Subdomain,
+				})
+			}
+
+			// Register with proxy
+			mapping, err := proxy.RegisterForkWithProxy(forkID, proxyServices)
+			if err != nil {
+				fmt.Printf("Warning: Failed to register with proxy: %v\n", err)
+				fmt.Printf("Run 'worklet proxy start' to start the proxy server\n")
+			} else {
+				forkMapping = mapping
+				fmt.Printf("\nProxy URLs:\n")
+				for _, service := range cfg.Services {
+					url, _ := forkMapping.GetServiceURL(service.Name)
+					fmt.Printf("  %s: %s\n", service.Name, url)
+				}
+				fmt.Printf("\n")
+			}
+		}
+	}
+
 	fmt.Printf("Running: docker %s\n", strings.Join(args, " "))
 
-	if err := cmd.Run(); err != nil {
+	// Run the container
+	err = cmd.Run()
+
+	// Unregister from proxy when container exits
+	if forkMapping != nil {
+		if unregErr := proxy.UnregisterForkFromProxy(forkID); unregErr != nil {
+			fmt.Printf("Warning: Failed to unregister from proxy: %v\n", unregErr)
+		}
+	}
+
+	if err != nil {
 		return fmt.Errorf("docker command failed: %w", err)
 	}
 
@@ -121,25 +186,25 @@ func getEntrypointScriptPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
-	
+
 	// Write the embedded script content
 	if _, err := tmpFile.WriteString(dindEntrypointScript); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("failed to write script: %w", err)
 	}
-	
+
 	// Close the file
 	if err := tmpFile.Close(); err != nil {
 		os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("failed to close temp file: %w", err)
 	}
-	
+
 	// Make it executable
 	if err := os.Chmod(tmpFile.Name(), 0755); err != nil {
 		os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("failed to make script executable: %w", err)
 	}
-	
+
 	return tmpFile.Name(), nil
 }

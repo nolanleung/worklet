@@ -1,0 +1,7 @@
+# Ignore Docker build artifacts
+*.tar
+*.tar.gz
+
+# Ignore temporary build directories
+*/build/
+*/tmp/

@@ -56,7 +56,7 @@ Examples:
 		fmt.Fprintf(os.Stderr, "Switching to fork: %s (%s)\n", selectedFork.Name, selectedFork.SessionID)
 		
 		// Run the Docker container in the fork directory
-		return RunInDirectory(selectedFork.Path)
+		return RunInDirectoryWithForkID(selectedFork.Path, selectedFork.SessionID)
 	},
 }
 

@@ -10,8 +10,9 @@ import (
 )
 
 type WorkletConfig struct {
-	Fork ForkConfig `json:"fork"`
-	Run  RunConfig  `json:"run"`
+	Fork     ForkConfig      `json:"fork"`
+	Run      RunConfig       `json:"run"`
+	Services []ServiceConfig `json:"services"`
 }
 
 type ForkConfig struct {
@@ -29,6 +30,12 @@ type RunConfig struct {
 	Privileged  bool              `json:"privileged"`
 	Isolation   string            `json:"isolation"` // "full" for DinD, "shared" for socket mount (default: "shared")
 	InitScript  []string          `json:"initScript"` // Commands to run on container start
+}
+
+type ServiceConfig struct {
+	Name      string `json:"name"`      // Service name (e.g., "api", "frontend")
+	Port      int    `json:"port"`      // Port the service runs on inside container
+	Subdomain string `json:"subdomain"` // Subdomain prefix (e.g., "api" for api.*.fork.local.worklet.sh)
 }
 
 func LoadConfig(dir string) (*WorkletConfig, error) {

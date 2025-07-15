@@ -25,16 +25,32 @@ var runCmd = &cobra.Command{
 
 // RunInDirectory runs worklet in the specified directory
 func RunInDirectory(dir string) error {
+	return RunInDirectoryWithForkID(dir, "")
+}
+
+// RunInDirectoryWithForkID runs worklet in the specified directory with an optional fork ID
+func RunInDirectoryWithForkID(dir string, forkID string) error {
 	// Load config
 	cfg, err := config.LoadConfig(dir)
 	if err != nil {
 		return fmt.Errorf("failed to load .worklet.jsonc: %w", err)
 	}
 
+	// Generate a simple fork ID if not provided
+	if forkID == "" {
+		// For direct run command, use a simple ID
+		forkID = "run-" + generateSimpleID()
+	}
+
 	// Run in Docker
-	if err := docker.RunContainer(dir, cfg); err != nil {
+	if err := docker.RunContainer(dir, cfg, forkID); err != nil {
 		return fmt.Errorf("failed to run container: %w", err)
 	}
 
 	return nil
+}
+
+func generateSimpleID() string {
+	// Simple ID generation for run command
+	return fmt.Sprintf("%d", os.Getpid())
 }
