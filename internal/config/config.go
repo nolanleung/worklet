@@ -30,6 +30,11 @@ type RunConfig struct {
 	Privileged  bool              `json:"privileged"`
 	Isolation   string            `json:"isolation"` // "full" for DinD, "shared" for socket mount (default: "shared")
 	InitScript  []string          `json:"initScript"` // Commands to run on container start
+	Credentials *CredentialConfig `json:"credentials,omitempty"`
+}
+
+type CredentialConfig struct {
+	Claude bool `json:"claude,omitempty"` // Mount Claude credentials volume
 }
 
 type ServiceConfig struct {

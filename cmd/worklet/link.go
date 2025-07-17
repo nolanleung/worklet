@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tidwall/jsonc"
@@ -23,9 +22,9 @@ var linkCmd = &cobra.Command{
 
 var linkClaudeCmd = &cobra.Command{
 	Use:   "claude",
-	Short: "Link Claude Code authentication to worklet",
-	Long: `Links Claude Code authentication by adding a volume mount for ~/.claude to your worklet configuration.
-This allows you to use Claude Code inside worklet containers.`,
+	Short: "Enable Claude in worklet configuration",
+	Long: `Enables Claude in your worklet configuration by adding the necessary credential settings.
+This allows worklet containers to use Claude credentials managed by 'worklet credentials claude'.`,
 	RunE: runLinkClaude,
 }
 
@@ -62,15 +61,6 @@ func runLinkClaude(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Get home directory
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	// Define the Claude volume mount
-	claudeVolume := fmt.Sprintf("%s/.claude:/root/.claude:ro", homeDir)
-
 	// Ensure run section exists
 	runSection, ok := configMap["run"].(map[string]interface{})
 	if !ok {
@@ -78,38 +68,22 @@ func runLinkClaude(cmd *cobra.Command, args []string) error {
 		configMap["run"] = runSection
 	}
 
-	// Get or create volumes array
-	volumes, ok := runSection["volumes"].([]interface{})
+	// Get or create credentials section
+	credentials, ok := runSection["credentials"].(map[string]interface{})
 	if !ok {
-		volumes = []interface{}{}
+		credentials = make(map[string]interface{})
 	}
 
-	// Check if Claude volume already exists
-	claudeVolumeExists := false
-	for _, v := range volumes {
-		if volStr, ok := v.(string); ok {
-			// Check if this is a Claude volume mount
-			if strings.Contains(volStr, "/.claude:") {
-				if linkForce {
-					// Remove existing Claude volume mount
-					continue
-				} else {
-					claudeVolumeExists = true
-					break
-				}
-			}
-		}
-	}
-
-	if claudeVolumeExists {
-		fmt.Println("Claude volume mount already exists in configuration.")
-		fmt.Println("Use --force to overwrite existing Claude volume mounts.")
+	// Check if Claude is already enabled
+	if claude, ok := credentials["claude"].(bool); ok && claude && !linkForce {
+		fmt.Println("Claude is already enabled in configuration.")
+		fmt.Println("Use --force to re-enable.")
 		return nil
 	}
 
-	// Add Claude volume
-	volumes = append(volumes, claudeVolume)
-	runSection["volumes"] = volumes
+	// Enable Claude
+	credentials["claude"] = true
+	runSection["credentials"] = credentials
 
 	// Marshal back to JSON with indentation
 	updatedJSON, err := json.MarshalIndent(configMap, "", "  ")
@@ -122,12 +96,14 @@ func runLinkClaude(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
-	fmt.Println("Successfully linked Claude authentication to worklet configuration.")
-	fmt.Printf("Added volume mount: %s\n", claudeVolume)
-	fmt.Println("\nYou can now use Claude Code inside your worklet containers!")
-	fmt.Println("Example:")
-	fmt.Println("  $ worklet switch my-fork")
-	fmt.Println("  /workspace # claude --help")
+	fmt.Println("Successfully enabled Claude in worklet configuration.")
+	fmt.Println("\nNext steps:")
+	fmt.Println("1. If you haven't already, set up Claude credentials:")
+	fmt.Println("   $ worklet credentials claude setup")
+	fmt.Println("")
+	fmt.Println("2. Use Claude in your worklet containers:")
+	fmt.Println("   $ worklet switch my-fork")
+	fmt.Println("   /workspace # claude --help")
 
 	return nil
 }

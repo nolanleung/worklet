@@ -9,6 +9,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	mountMode bool
+)
+
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the repository in a Docker container with Docker-in-Docker support",
@@ -21,6 +25,10 @@ var runCmd = &cobra.Command{
 
 		return RunInDirectory(cwd)
 	},
+}
+
+func init() {
+	runCmd.Flags().BoolVar(&mountMode, "mount", false, "Mount workspace directory instead of copying files (allows real-time sync)")
 }
 
 // RunInDirectory runs worklet in the specified directory
@@ -43,7 +51,7 @@ func RunInDirectoryWithForkID(dir string, forkID string) error {
 	}
 
 	// Run in Docker
-	if err := docker.RunContainer(dir, cfg, forkID); err != nil {
+	if err := docker.RunContainer(dir, cfg, forkID, mountMode); err != nil {
 		return fmt.Errorf("failed to run container: %w", err)
 	}
 

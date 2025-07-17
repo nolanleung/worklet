@@ -3,6 +3,7 @@ package docker
 import (
 	_ "embed"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,7 +16,30 @@ import (
 //go:embed dind-entrypoint.sh
 var dindEntrypointScript string
 
-func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string) error {
+func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string, mountMode bool) error {
+	var imageName string
+	var err error
+
+	// In copy mode, build a temporary image with the workspace files
+	if !mountMode {
+		imageName, err = buildCopyImage(workDir, cfg, forkID)
+		if err != nil {
+			return fmt.Errorf("failed to build copy image: %w", err)
+		}
+		// Ensure cleanup of temporary image
+		defer func() {
+			if removeErr := removeImage(imageName); removeErr != nil {
+				fmt.Printf("Warning: Failed to remove temporary image %s: %v\n", imageName, removeErr)
+			}
+		}()
+	} else {
+		// In mount mode, use the configured image
+		imageName = cfg.Run.Image
+		if imageName == "" {
+			imageName = "docker:dind"
+		}
+	}
+
 	// Build docker run command
 	args := []string{"run", "--rm", "-it"}
 
@@ -39,12 +63,16 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string) erro
 	args = append(args, "--label", "worklet.fork=true")
 	args = append(args, "--label", fmt.Sprintf("worklet.fork.id=%s", forkID))
 
-	// Add working directory mount
-	absWorkDir, err := filepath.Abs(workDir)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
+	// In mount mode, add volume mount
+	if mountMode {
+		absWorkDir, err := filepath.Abs(workDir)
+		if err != nil {
+			return fmt.Errorf("failed to get absolute path: %w", err)
+		}
+		args = append(args, "-v", fmt.Sprintf("%s:/workspace", absWorkDir))
 	}
-	args = append(args, "-v", fmt.Sprintf("%s:/workspace", absWorkDir))
+	
+	// Always set working directory
 	args = append(args, "-w", "/workspace")
 
 	// Determine isolation mode (default to "full" if not specified)
@@ -94,10 +122,25 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string) erro
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
 	}
 
-	// Add init script if provided
+	// Build init script
+	var initScripts []string
+	
+	// Add user-provided init script
 	if len(cfg.Run.InitScript) > 0 {
-		// Join commands with && to ensure each succeeds
-		initScript := strings.Join(cfg.Run.InitScript, " && ")
+		initScripts = append(initScripts, cfg.Run.InitScript...)
+	}
+	
+	// Add credential init script if needed
+	if cfg.Run.Credentials != nil && cfg.Run.Credentials.Claude {
+		if credInitScript := GetCredentialInitScript(true); credInitScript != "" {
+			// Prepend credential setup to ensure it runs first
+			initScripts = append([]string{credInitScript}, initScripts...)
+		}
+	}
+	
+	// Set combined init script if we have any
+	if len(initScripts) > 0 {
+		initScript := strings.Join(initScripts, " && ")
 		args = append(args, "-e", fmt.Sprintf("WORKLET_INIT_SCRIPT=%s", initScript))
 	}
 
@@ -106,12 +149,14 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string) erro
 		args = append(args, "-v", volume)
 	}
 
-	// Add image
-	image := cfg.Run.Image
-	if image == "" {
-		image = "docker:dind"
+	// Add credential volumes if configured
+	if cfg.Run.Credentials != nil && cfg.Run.Credentials.Claude {
+		credentialMounts := GetCredentialVolumeMounts(true)
+		args = append(args, credentialMounts...)
 	}
-	args = append(args, image)
+
+	// Add image (use temporary image in copy mode, configured image in mount mode)
+	args = append(args, imageName)
 
 	// Add command
 	if len(cfg.Run.Command) > 0 {
@@ -207,4 +252,143 @@ func getEntrypointScriptPath() (string, error) {
 	}
 
 	return tmpFile.Name(), nil
+}
+
+// buildCopyImage builds a temporary Docker image with the workspace files copied in
+func buildCopyImage(workDir string, cfg *config.WorkletConfig, forkID string) (string, error) {
+	// Generate unique image name
+	imageName := fmt.Sprintf("worklet-temp-%s", forkID)
+	
+	// Get base image
+	baseImage := cfg.Run.Image
+	if baseImage == "" {
+		baseImage = "docker:dind"
+	}
+	
+	// Create temporary directory for build context
+	buildDir, err := os.MkdirTemp("", "worklet-build-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create build directory: %w", err)
+	}
+	defer os.RemoveAll(buildDir)
+	
+	// Create Dockerfile
+	dockerfilePath := filepath.Join(buildDir, "Dockerfile")
+	dockerfileContent := fmt.Sprintf(`FROM %s
+COPY workspace /workspace
+WORKDIR /workspace
+`, baseImage)
+	
+	if err := os.WriteFile(dockerfilePath, []byte(dockerfileContent), 0644); err != nil {
+		return "", fmt.Errorf("failed to write Dockerfile: %w", err)
+	}
+	
+	// Create workspace directory in build context
+	workspaceDir := filepath.Join(buildDir, "workspace")
+	if err := os.Mkdir(workspaceDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create workspace directory: %w", err)
+	}
+	
+	// Copy files to build context, respecting .dockerignore and fork exclude patterns
+	if err := copyWorkspace(workDir, workspaceDir, cfg.Fork.Exclude); err != nil {
+		return "", fmt.Errorf("failed to copy workspace: %w", err)
+	}
+	
+	// Build the image
+	cmd := exec.Command("docker", "build", "-t", imageName, buildDir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
+	fmt.Printf("Building temporary image with copied files...\n")
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to build image: %w", err)
+	}
+	
+	return imageName, nil
+}
+
+// removeImage removes a Docker image
+func removeImage(imageName string) error {
+	cmd := exec.Command("docker", "rmi", imageName)
+	return cmd.Run()
+}
+
+// copyWorkspace copies files from source to destination, respecting exclude patterns
+func copyWorkspace(src, dst string, excludePatterns []string) error {
+	// First, check if .dockerignore exists and parse it
+	dockerignorePath := filepath.Join(src, ".dockerignore")
+	var dockerignorePatterns []string
+	if data, err := os.ReadFile(dockerignorePath); err == nil {
+		dockerignorePatterns = strings.Split(string(data), "\n")
+	}
+	
+	// Combine exclude patterns
+	allExcludes := append(excludePatterns, dockerignorePatterns...)
+	
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		
+		// Get relative path
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		
+		// Skip if path matches any exclude pattern
+		for _, pattern := range allExcludes {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" || strings.HasPrefix(pattern, "#") {
+				continue
+			}
+			
+			matched, _ := filepath.Match(pattern, relPath)
+			if matched || strings.Contains(relPath, pattern) {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		
+		// Construct destination path
+		dstPath := filepath.Join(dst, relPath)
+		
+		// Create directory or copy file
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+		
+		// Copy file
+		return copyFile(path, dstPath)
+	})
+}
+
+// copyFile copies a single file
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+	
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+	
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return err
+	}
+	
+	// Copy file permissions
+	sourceInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	
+	return os.Chmod(dst, sourceInfo.Mode())
 }
