@@ -3,7 +3,6 @@ package terminal
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
@@ -33,7 +32,6 @@ func ListForks() ([]Fork, error) {
 
 	var forks []Fork
 	for _, container := range containers {
-		log.Println("Checking container:", container.ID)
 		// Check if this is a worklet container
 		for k, v := range container.Labels {
 			if k == "worklet.fork" && v == "true" {

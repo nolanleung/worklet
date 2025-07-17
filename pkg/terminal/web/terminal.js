@@ -101,15 +101,22 @@ function connectToFork() {
         terminal.writeln('');
         
         // Send initial resize
-        socket.send(JSON.stringify({
-            type: 'resize',
-            rows: terminal.rows,
-            cols: terminal.cols
-        }));
+        // socket.send(JSON.stringify({
+        //     type: 'resize',
+        //     rows: terminal.rows,
+        //     cols: terminal.cols
+        // }));
     };
     
-    socket.onmessage = (event) => {
-        terminal.write(event.data);
+    socket.onmessage = async (event) => {
+        if (event.data instanceof Blob) {
+            // Handle binary message
+            const text = await event.data.text();
+            terminal.write(text);
+        } else {
+            // Handle text message (for backwards compatibility)
+            terminal.write(event.data);
+        }
     };
     
     socket.onerror = (error) => {

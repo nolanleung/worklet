@@ -108,15 +108,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Create terminal session
-	session, err := s.manager.CreateSession(forkID, conn)
+	// Create or attach to terminal session
+	session, err := s.manager.CreateOrAttachSession(forkID, conn)
 	if err != nil {
-		log.Printf("Failed to create session: %v", err)
+		log.Printf("Failed to create/attach session: %v", err)
 		conn.WriteJSON(map[string]string{"error": err.Error()})
 		return
 	}
-	defer s.manager.RemoveSession(session.ID)
+	defer s.manager.DetachSession(session.ID, conn)
 
-	// Start session
+	// Start session (will handle both new and existing sessions)
 	session.Start()
 }
