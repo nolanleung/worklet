@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/nolanleung/worklet/internal/config"
 	"github.com/schollz/progressbar/v3"
 )
@@ -107,6 +108,9 @@ func CreateFork(sourcePath string, cfg *config.WorkletConfig) (string, error) {
 }
 
 func copyDirectory(src, dst string, exclude []string) error {
+	// Create gitignore matcher
+	matcher := createGitignoreMatcher(src, exclude)
+
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return fmt.Errorf("error accessing path %s: %w", path, err)
@@ -123,8 +127,11 @@ func copyDirectory(src, dst string, exclude []string) error {
 			return nil
 		}
 
+		// Convert path to components for matcher
+		pathComponents := strings.Split(relPath, string(filepath.Separator))
+
 		// Check if path should be excluded
-		if shouldExclude(relPath, exclude) {
+		if matcher.Match(pathComponents, info.IsDir()) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -168,44 +175,50 @@ func copyDirectory(src, dst string, exclude []string) error {
 	})
 }
 
-// shouldExclude checks if a path matches any of the exclusion patterns
-func shouldExclude(path string, patterns []string) bool {
-	for _, pattern := range patterns {
-		// Check exact match
-		if matched, _ := filepath.Match(pattern, path); matched {
-			return true
+// createGitignoreMatcher creates a gitignore matcher from config excludes and .dockerignore
+func createGitignoreMatcher(src string, excludePatterns []string) gitignore.Matcher {
+	var patterns []gitignore.Pattern
+
+	// Always exclude .dockerignore itself
+	patterns = append(patterns, gitignore.ParsePattern(".dockerignore", nil))
+
+	// Add patterns from config (fork.exclude)
+	for _, pattern := range excludePatterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern != "" && !strings.HasPrefix(pattern, "#") {
+			patterns = append(patterns, gitignore.ParsePattern(pattern, nil))
 		}
-		
-		// Check if any parent directory matches the pattern
-		dir := path
-		for dir != "." && dir != "/" {
-			if matched, _ := filepath.Match(pattern, filepath.Base(dir)); matched {
-				return true
-			}
-			dir = filepath.Dir(dir)
-		}
-		
-		// Check if the pattern matches any part of the path
-		pathParts := strings.Split(path, string(filepath.Separator))
-		for _, part := range pathParts {
-			if matched, _ := filepath.Match(pattern, part); matched {
-				return true
+	}
+
+	// Read and parse .dockerignore file if it exists
+	dockerignorePath := filepath.Join(src, ".dockerignore")
+	if data, err := os.ReadFile(dockerignorePath); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				patterns = append(patterns, gitignore.ParsePattern(line, nil))
 			}
 		}
 	}
-	return false
+
+	// Create matcher with all patterns
+	return gitignore.NewMatcher(patterns)
 }
 
 // countFiles counts the total number of files and total size to be copied
 func countFiles(src string, cfg *config.WorkletConfig) (*FileInfo, error) {
 	info := &FileInfo{}
-	
+
 	// Default to including .git if not specified
 	includeGit := true
 	if cfg.Fork.IncludeGit != nil {
 		includeGit = *cfg.Fork.IncludeGit
 	}
-	
+
+	// Create gitignore matcher
+	matcher := createGitignoreMatcher(src, cfg.Fork.Exclude)
+
 	err := filepath.Walk(src, func(path string, fileInfo os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -220,7 +233,11 @@ func countFiles(src string, cfg *config.WorkletConfig) (*FileInfo, error) {
 			return nil
 		}
 
-		if shouldExclude(relPath, cfg.Fork.Exclude) {
+		// Convert path to components for matcher
+		pathComponents := strings.Split(relPath, string(filepath.Separator))
+
+		// Check if path should be excluded
+		if matcher.Match(pathComponents, fileInfo.IsDir()) {
 			if fileInfo.IsDir() {
 				return filepath.SkipDir
 			}
@@ -250,7 +267,10 @@ func copyDirectoryWithProgress(src, dst string, cfg *config.WorkletConfig, bar *
 	if cfg.Fork.IncludeGit != nil {
 		includeGit = *cfg.Fork.IncludeGit
 	}
-	
+
+	// Create gitignore matcher
+	matcher := createGitignoreMatcher(src, cfg.Fork.Exclude)
+
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return fmt.Errorf("error accessing path %s: %w", path, err)
@@ -267,8 +287,11 @@ func copyDirectoryWithProgress(src, dst string, cfg *config.WorkletConfig, bar *
 			return nil
 		}
 
+		// Convert path to components for matcher
+		pathComponents := strings.Split(relPath, string(filepath.Separator))
+
 		// Check if path should be excluded
-		if shouldExclude(relPath, cfg.Fork.Exclude) {
+		if matcher.Match(pathComponents, info.IsDir()) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -352,7 +375,7 @@ func copyFileWithProgress(src, dst string, mode os.FileMode, bar *progressbar.Pr
 
 	// Create a custom writer that updates the progress bar
 	progressReader := progressbar.NewReader(srcFile, bar)
-	
+
 	_, err = io.Copy(dstFile, &progressReader)
 	return err
 }
@@ -442,7 +465,7 @@ func RemoveFork(sessionID string) error {
 	}
 
 	forkPath := filepath.Join(forksDir, sessionID)
-	
+
 	// Check if fork exists
 	if _, err := os.Stat(forkPath); os.IsNotExist(err) {
 		return fmt.Errorf("fork %s not found", sessionID)

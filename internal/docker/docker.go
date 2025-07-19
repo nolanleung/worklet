@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/nolanleung/worklet/internal/config"
 	"github.com/nolanleung/worklet/pkg/proxy"
 )
@@ -71,7 +72,7 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string, moun
 		}
 		args = append(args, "-v", fmt.Sprintf("%s:/workspace", absWorkDir))
 	}
-	
+
 	// Always set working directory
 	args = append(args, "-w", "/workspace")
 
@@ -124,12 +125,12 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string, moun
 
 	// Build init script
 	var initScripts []string
-	
+
 	// Add user-provided init script
 	if len(cfg.Run.InitScript) > 0 {
 		initScripts = append(initScripts, cfg.Run.InitScript...)
 	}
-	
+
 	// Add credential init script if needed
 	if cfg.Run.Credentials != nil && cfg.Run.Credentials.Claude {
 		if credInitScript := GetCredentialInitScript(true); credInitScript != "" {
@@ -137,7 +138,7 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string, moun
 			initScripts = append([]string{credInitScript}, initScripts...)
 		}
 	}
-	
+
 	// Set combined init script if we have any
 	if len(initScripts) > 0 {
 		initScript := strings.Join(initScripts, " && ")
@@ -258,52 +259,52 @@ func getEntrypointScriptPath() (string, error) {
 func buildCopyImage(workDir string, cfg *config.WorkletConfig, forkID string) (string, error) {
 	// Generate unique image name
 	imageName := fmt.Sprintf("worklet-temp-%s", forkID)
-	
+
 	// Get base image
 	baseImage := cfg.Run.Image
 	if baseImage == "" {
 		baseImage = "docker:dind"
 	}
-	
+
 	// Create temporary directory for build context
 	buildDir, err := os.MkdirTemp("", "worklet-build-*")
 	if err != nil {
 		return "", fmt.Errorf("failed to create build directory: %w", err)
 	}
 	defer os.RemoveAll(buildDir)
-	
+
 	// Create Dockerfile
 	dockerfilePath := filepath.Join(buildDir, "Dockerfile")
 	dockerfileContent := fmt.Sprintf(`FROM %s
 COPY workspace /workspace
 WORKDIR /workspace
 `, baseImage)
-	
+
 	if err := os.WriteFile(dockerfilePath, []byte(dockerfileContent), 0644); err != nil {
 		return "", fmt.Errorf("failed to write Dockerfile: %w", err)
 	}
-	
+
 	// Create workspace directory in build context
 	workspaceDir := filepath.Join(buildDir, "workspace")
 	if err := os.Mkdir(workspaceDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create workspace directory: %w", err)
 	}
-	
+
 	// Copy files to build context, respecting .dockerignore and fork exclude patterns
 	if err := copyWorkspace(workDir, workspaceDir, cfg.Fork.Exclude); err != nil {
 		return "", fmt.Errorf("failed to copy workspace: %w", err)
 	}
-	
+
 	// Build the image
 	cmd := exec.Command("docker", "build", "-t", imageName, buildDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	
+
 	fmt.Printf("Building temporary image with copied files...\n")
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("failed to build image: %w", err)
 	}
-	
+
 	return imageName, nil
 }
 
@@ -315,51 +316,71 @@ func removeImage(imageName string) error {
 
 // copyWorkspace copies files from source to destination, respecting exclude patterns
 func copyWorkspace(src, dst string, excludePatterns []string) error {
-	// First, check if .dockerignore exists and parse it
-	dockerignorePath := filepath.Join(src, ".dockerignore")
-	var dockerignorePatterns []string
-	if data, err := os.ReadFile(dockerignorePath); err == nil {
-		dockerignorePatterns = strings.Split(string(data), "\n")
+	fmt.Printf("Copying workspace files from %s to %s...\n", src, dst)
+	// Create gitignore patterns from config excludes
+	var patterns []gitignore.Pattern
+
+	// Always exclude .dockerignore itself
+	patterns = append(patterns, gitignore.ParsePattern(".dockerignore", nil))
+
+	// Add patterns from config (fork.exclude)
+	for _, pattern := range excludePatterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern != "" && !strings.HasPrefix(pattern, "#") {
+			patterns = append(patterns, gitignore.ParsePattern(pattern, nil))
+		}
 	}
-	
-	// Combine exclude patterns
-	allExcludes := append(excludePatterns, dockerignorePatterns...)
-	
+
+	// Read and parse .dockerignore file if it exists
+	dockerignorePath := filepath.Join(src, ".dockerignore")
+	if data, err := os.ReadFile(dockerignorePath); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				patterns = append(patterns, gitignore.ParsePattern(line, nil))
+			}
+		}
+	}
+
+	// Create matcher with all patterns
+	matcher := gitignore.NewMatcher(patterns)
+
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		
+
 		// Get relative path
 		relPath, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
 		}
-		
-		// Skip if path matches any exclude pattern
-		for _, pattern := range allExcludes {
-			pattern = strings.TrimSpace(pattern)
-			if pattern == "" || strings.HasPrefix(pattern, "#") {
-				continue
-			}
-			
-			matched, _ := filepath.Match(pattern, relPath)
-			if matched || strings.Contains(relPath, pattern) {
-				if info.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
+
+		// Skip the root directory itself
+		if relPath == "." {
+			return nil
 		}
-		
+
+		// Convert path to components for matcher
+		pathComponents := strings.Split(relPath, string(filepath.Separator))
+
+		// Check if path should be excluded
+		if matcher.Match(pathComponents, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
 		// Construct destination path
 		dstPath := filepath.Join(dst, relPath)
-		
+
 		// Create directory or copy file
 		if info.IsDir() {
 			return os.MkdirAll(dstPath, info.Mode())
 		}
-		
+
 		// Copy file
 		return copyFile(path, dstPath)
 	})
@@ -372,23 +393,23 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer sourceFile.Close()
-	
+
 	destFile, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
 	defer destFile.Close()
-	
+
 	_, err = io.Copy(destFile, sourceFile)
 	if err != nil {
 		return err
 	}
-	
+
 	// Copy file permissions
 	sourceInfo, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
-	
+
 	return os.Chmod(dst, sourceInfo.Mode())
 }
