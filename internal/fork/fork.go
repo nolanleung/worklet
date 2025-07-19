@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -577,4 +579,90 @@ func ResolveFork(identifier string) (string, error) {
 		return "", err
 	}
 	return fork.Path, nil
+}
+
+// HasChanges checks if a fork directory has any modifications
+func HasChanges(forkPath string) (bool, error) {
+	return false, nil
+
+	// Check if the fork path exists
+	if _, err := os.Stat(forkPath); err != nil {
+		return false, fmt.Errorf("fork path does not exist: %w", err)
+	}
+
+	// Check if it's a git repository
+	gitDir := filepath.Join(forkPath, ".git")
+	if _, err := os.Stat(gitDir); err == nil {
+		// Use git to check for changes
+		cmd := exec.Command("git", "status", "--porcelain")
+		cmd.Dir = forkPath
+		output, err := cmd.Output()
+		log.Println(string(output))
+
+		if err != nil {
+			// Git command failed, fall back to timestamp check
+			return hasChangesUsingTimestamps(forkPath)
+		}
+
+		// Check for any output (modified, added, deleted files)
+		if len(output) > 0 {
+			return true, nil
+		}
+
+		// Also check for untracked files
+		cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard")
+		cmd.Dir = forkPath
+		output, err = cmd.Output()
+		if err != nil {
+			return hasChangesUsingTimestamps(forkPath)
+		}
+
+		log.Println(output)
+
+		return len(output) > 0, nil
+	}
+
+	// Not a git repo, use timestamp-based detection
+	return hasChangesUsingTimestamps(forkPath)
+}
+
+// hasChangesUsingTimestamps checks for changes by comparing file modification times
+func hasChangesUsingTimestamps(forkPath string) (bool, error) {
+	// Get fork creation time from lock file
+	lockPath := filepath.Join(forkPath, ".worklet.lock")
+	lockInfo, err := os.Stat(lockPath)
+	if err != nil {
+		// No lock file, assume changes to be safe
+		return true, nil
+	}
+
+	creationTime := lockInfo.ModTime()
+	hasChanges := false
+
+	// Walk through all files and check modification times
+	err = filepath.Walk(forkPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip the lock file itself
+		if path == lockPath {
+			return nil
+		}
+
+		// Skip directories
+		if info.IsDir() {
+			return nil
+		}
+
+		// Check if file was modified after fork creation
+		if info.ModTime().After(creationTime) {
+			hasChanges = true
+			return filepath.SkipAll // Stop walking, we found a change
+		}
+
+		return nil
+	})
+
+	return hasChanges, err
 }

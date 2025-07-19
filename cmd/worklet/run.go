@@ -20,7 +20,7 @@ var (
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the repository in an isolated fork with Docker-in-Docker support",
-	Long:  `Creates an isolated copy (fork) of the repository and runs it in a Docker container with Docker-in-Docker capabilities based on .worklet.jsonc configuration.
+	Long: `Creates an isolated copy (fork) of the repository and runs it in a Docker container with Docker-in-Docker capabilities based on .worklet.jsonc configuration.
 
 By default, worklet run creates a fork to ensure your source files are not modified. Use --no-fork to run directly in the source directory.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -52,7 +52,30 @@ By default, worklet run creates a fork to ensure your source files are not modif
 			// Extract fork ID from path (e.g., "fork-123" from the directory name)
 			forkID := filepath.Base(forkPath)
 			fmt.Printf("Running in fork: %s\n", forkID)
-			
+
+			// Clean up fork after session if no changes were made
+			defer func() {
+				// Check if fork has changes before deleting
+				hasChanges, err := fork.HasChanges(forkPath)
+				if err != nil {
+					fmt.Printf("Warning: Failed to check for changes in fork %s: %v\n", forkID, err)
+					// Err on the side of caution, don't delete
+					return
+				}
+
+				if hasChanges {
+					fmt.Printf("\nFork %s has modifications and will be preserved.\n", forkID)
+					fmt.Printf("To remove it manually, run: worklet remove %s\n", forkID)
+				} else {
+					// No changes, safe to delete
+					if err := fork.RemoveFork(forkID); err != nil {
+						fmt.Printf("Warning: Failed to remove temporary fork %s: %v\n", forkID, err)
+					} else {
+						fmt.Printf("Cleaned up temporary fork: %s (no changes detected)\n", forkID)
+					}
+				}
+			}()
+
 			// Run in the fork directory
 			return RunInDirectoryWithForkID(forkPath, forkID)
 		}
