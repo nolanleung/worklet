@@ -165,6 +165,9 @@ ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
 
+# Install PNPM globally
+RUN corepack prepare pnpm@latest --activate
+
 # Set the TERM environment variable to enable color output in terminal applications
 ENV TERM=xterm-256color
 
