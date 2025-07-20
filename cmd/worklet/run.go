@@ -18,11 +18,19 @@ var (
 )
 
 var runCmd = &cobra.Command{
-	Use:   "run",
+	Use:   "run [command]",
 	Short: "Run the repository in an isolated fork with Docker-in-Docker support",
 	Long: `Creates an isolated copy (fork) of the repository and runs it in a Docker container with Docker-in-Docker capabilities based on .worklet.jsonc configuration.
 
-By default, worklet run creates a fork to ensure your source files are not modified. Use --no-fork to run directly in the source directory.`,
+By default, worklet run creates a fork to ensure your source files are not modified. Use --no-fork to run directly in the source directory.
+
+Examples:
+  worklet run                    # Run default shell
+  worklet run echo "hello"       # Run echo command
+  worklet run python app.py      # Run Python script
+  worklet run npm test           # Run npm test
+  worklet run --mount=false bash # Run bash in copy mode`,
+	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -77,11 +85,11 @@ By default, worklet run creates a fork to ensure your source files are not modif
 			}()
 
 			// Run in the fork directory
-			return RunInDirectoryWithForkID(forkPath, forkID)
+			return RunInDirectoryWithForkID(forkPath, forkID, args...)
 		}
 
 		// Otherwise run in the current directory
-		return RunInDirectory(cwd)
+		return RunInDirectory(cwd, args...)
 	},
 }
 
@@ -92,12 +100,12 @@ func init() {
 }
 
 // RunInDirectory runs worklet in the specified directory
-func RunInDirectory(dir string) error {
-	return RunInDirectoryWithForkID(dir, "")
+func RunInDirectory(dir string, cmdArgs ...string) error {
+	return RunInDirectoryWithForkID(dir, "", cmdArgs...)
 }
 
 // RunInDirectoryWithForkID runs worklet in the specified directory with an optional fork ID
-func RunInDirectoryWithForkID(dir string, forkID string) error {
+func RunInDirectoryWithForkID(dir string, forkID string, cmdArgs ...string) error {
 	// Load config
 	cfg, err := config.LoadConfig(dir)
 	if err != nil {
@@ -111,7 +119,7 @@ func RunInDirectoryWithForkID(dir string, forkID string) error {
 	}
 
 	// Run in Docker
-	if err := docker.RunContainer(dir, cfg, forkID, mountMode); err != nil {
+	if err := docker.RunContainer(dir, cfg, forkID, mountMode, cmdArgs...); err != nil {
 		return fmt.Errorf("failed to run container: %w", err)
 	}
 

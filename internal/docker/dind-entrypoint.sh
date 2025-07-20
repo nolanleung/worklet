@@ -66,6 +66,19 @@ echo ""
 # Execute the provided command or shell
 if [ $# -eq 0 ]; then
     exec sh
+elif [ $# -eq 1 ]; then
+    # Single argument - check if it contains spaces (likely a multi-word command)
+    case "$1" in
+        *" "*)
+            # Contains spaces, use shell to parse it
+            exec sh -c "$1"
+            ;;
+        *)
+            # Single command, execute directly
+            exec "$1"
+            ;;
+    esac
 else
+    # Multiple arguments, execute directly
     exec "$@"
 fi

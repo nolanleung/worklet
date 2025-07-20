@@ -17,7 +17,7 @@ import (
 //go:embed dind-entrypoint.sh
 var dindEntrypointScript string
 
-func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string, mountMode bool) error {
+func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string, mountMode bool, cmdArgs ...string) error {
 	var imageName string
 	var err error
 
@@ -160,9 +160,14 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string, moun
 	args = append(args, imageName)
 
 	// Add command
-	if len(cfg.Run.Command) > 0 {
+	if len(cmdArgs) > 0 {
+		// Use provided command arguments
+		args = append(args, cmdArgs...)
+	} else if len(cfg.Run.Command) > 0 {
+		// Fall back to config command
 		args = append(args, cfg.Run.Command...)
 	} else {
+		// Default to shell
 		args = append(args, "sh")
 	}
 
