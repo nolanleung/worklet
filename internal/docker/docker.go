@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/nolanleung/worklet/internal/config"
-	"github.com/nolanleung/worklet/pkg/proxy"
 )
 
 //go:embed dind-entrypoint.sh
@@ -177,51 +176,10 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string, moun
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// Register with proxy if services are configured
-	var forkMapping *proxy.ForkMapping
-	if len(cfg.Services) > 0 {
-		// Initialize proxy if not already done
-		if err := proxy.InitGlobalProxy(); err != nil {
-			fmt.Printf("Warning: Failed to initialize proxy: %v\n", err)
-		} else {
-			// Convert config services to proxy services
-			var proxyServices []proxy.ServicePort
-			for _, service := range cfg.Services {
-				proxyServices = append(proxyServices, proxy.ServicePort{
-					ServiceName:   service.Name,
-					ContainerPort: service.Port,
-					Subdomain:     service.Subdomain,
-				})
-			}
-
-			// Register with proxy
-			mapping, err := proxy.RegisterForkWithProxy(forkID, proxyServices)
-			if err != nil {
-				fmt.Printf("Warning: Failed to register with proxy: %v\n", err)
-				fmt.Printf("Run 'worklet proxy start' to start the proxy server\n")
-			} else {
-				forkMapping = mapping
-				fmt.Printf("\nProxy URLs:\n")
-				for _, service := range cfg.Services {
-					url, _ := forkMapping.GetServiceURL(service.Name)
-					fmt.Printf("  %s: %s\n", service.Name, url)
-				}
-				fmt.Printf("\n")
-			}
-		}
-	}
-
 	fmt.Printf("Running: docker %s\n", strings.Join(args, " "))
 
 	// Run the container
 	err = cmd.Run()
-
-	// Unregister from proxy when container exits
-	if forkMapping != nil {
-		if unregErr := proxy.UnregisterForkFromProxy(forkID); unregErr != nil {
-			fmt.Printf("Warning: Failed to unregister from proxy: %v\n", unregErr)
-		}
-	}
 
 	if err != nil {
 		return fmt.Errorf("docker command failed: %w", err)

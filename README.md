@@ -7,7 +7,6 @@ A powerful tool for creating isolated development environments. Fork your reposi
 - **Isolated Testing**: Test changes without affecting your main repository
 - **Docker-in-Docker**: Run complex Docker workflows in complete isolation
 - **Git Integration**: Commit and push changes directly from forks
-- **Service Exposure**: Access your services via unique URLs with built-in reverse proxy
 - **Zero Configuration**: Works out of the box with sensible defaults
 - **Fast Switching**: Jump between different test environments instantly
 
@@ -82,15 +81,6 @@ The worklet binary includes all necessary scripts. No external dependencies beyo
 ### 🚀 **Init Scripts**
 Run initialization commands automatically when containers start - perfect for installing dependencies, setting up tools, or configuring the environment.
 
-### 🌐 **Service Exposure with Reverse Proxy**
-Expose your services with unique, accessible URLs through the built-in nginx reverse proxy:
-- Each service gets a unique URL like `api.x7k9m2p4.fork.local.worklet.sh`
-- Automatic service registration when containers start
-- Persistent mappings that survive proxy restarts
-- Support for multiple services per fork
-- WebSocket support included
-- Clean URLs for easy sharing and testing
-- Service URLs remain consistent for each fork
 
 ## Configuration
 
@@ -126,11 +116,11 @@ Create a `.worklet.jsonc` file in your repository root:
     "volumes": [],                       // Additional volume mounts
     "privileged": true                   // Required for Docker-in-Docker
   },
-  "services": [                          // Services to expose via reverse proxy
+  "services": [                          // Services configuration (for future use)
     {
       "name": "api",
       "port": 3000,                      // Port your service runs on
-      "subdomain": "api"                 // Access at api.{random}.fork.local.worklet.sh
+      "subdomain": "api"                 // Subdomain identifier
     },
     {
       "name": "frontend",
@@ -289,23 +279,6 @@ This modifies your `.worklet.jsonc` to include:
 }
 ```
 
-### `worklet proxy`
-Manage the nginx reverse proxy for service exposure. The proxy maintains persistent mappings of all registered services, storing them in `~/.worklet/proxy/mappings.json`. This means your service URLs remain consistent even after restarting the proxy or stopping containers.
-
-```bash
-worklet proxy start                  # Start the reverse proxy
-worklet proxy stop                   # Stop the reverse proxy
-worklet proxy status                  # Show proxy status and mappings
-worklet proxy list                    # List all registered forks (including stopped ones)
-worklet proxy logs                   # View nginx container logs
-worklet proxy inspect                # Show detailed container info
-worklet proxy register <fork-id>     # Manually register a fork
-worklet proxy unregister <fork-id>   # Remove a fork registration
-
-# All proxy commands support debug mode:
-worklet proxy --debug start          # Show detailed debug logging
-worklet proxy --debug list           # Debug why mappings aren't showing
-```
 
 ### `worklet terminal`
 Start a web-based terminal server for browser-based access to fork containers. The terminal server now includes full CORS support for cross-origin requests.
@@ -316,128 +289,6 @@ worklet terminal -p 3000            # Use custom port
 worklet terminal -o=false           # Don't auto-open browser
 worklet terminal --cors-origin="https://myapp.com"  # Set specific CORS origin
 worklet terminal --cors-origin="*"   # Allow all origins (default)
-```
-
-#### Starting the Proxy
-
-The proxy server runs an nginx container that routes traffic to your fork services:
-
-```bash
-$ worklet proxy start
-Proxy started successfully
-Services will be available at: http://{service}.{random}.fork.local.worklet.sh
-```
-
-#### Checking Proxy Status
-
-View the current proxy status and all active service mappings:
-
-```bash
-$ worklet proxy status
-Proxy Status: Running
-Health Check: OK
-
-Active Fork Mappings:
-
-Fork: fork-abc123
-  api: http://api.x7k9m2p4.fork.local.worklet.sh (container: worklet-fork-abc123-api, port: 3000)
-  frontend: http://app.x7k9m2p4.fork.local.worklet.sh (container: worklet-fork-abc123-frontend, port: 8080)
-```
-
-#### Manual Fork Registration
-
-You can manually register forks with the proxy without running them through worklet:
-
-```bash
-# Register with explicit services
-$ worklet proxy register my-app --service api:3000:api --service web:8080:app
-
-Fork 'my-app' registered successfully!
-
-Proxy URLs:
-  api: http://api.abc123xy.fork.local.worklet.sh (port 3000)
-  web: http://app.abc123xy.fork.local.worklet.sh (port 8080)
-
-# Register using services from .worklet.jsonc in current directory
-$ worklet proxy register my-app --from-config
-
-# Unregister when done
-$ worklet proxy unregister my-app
-Fork 'my-app' unregistered successfully
-```
-
-This is useful when:
-- Running services outside of worklet but want to use the proxy
-- Testing services in existing containers
-- Integrating with other tools that manage containers
-
-#### Listing Registered Forks
-
-View all forks registered with the proxy. Thanks to persistent storage, this command shows all registered forks even if their containers are stopped or the proxy was restarted:
-
-```bash
-# Default table format - shows all persisted mappings
-$ worklet proxy list
-FORK ID         SERVICE         URL
---------------- --------------- --------------------------------------------------
-my-app          api             http://api.x7k9m2p4.fork.local.worklet.sh
-                web             http://app.x7k9m2p4.fork.local.worklet.sh
-fork-abc123     frontend        http://app.y8n3k5q2.fork.local.worklet.sh
-                backend         http://api.y8n3k5q2.fork.local.worklet.sh
-
-Total: 2 forks, 4 services
-
-# JSON format for scripting
-$ worklet proxy list --json
-{
-  "forks": [
-    {
-      "id": "my-app",
-      "host": "x7k9m2p4",
-      "services": [...]
-    }
-  ],
-  "total_forks": 2,
-  "total_services": 4
-}
-
-# Verbose output with container details
-$ worklet proxy list --verbose
-```
-
-Note: The proxy loads mappings from `~/.worklet/proxy/mappings.json`, so you'll see all registered services even if containers aren't currently running.
-
-#### Automatic Registration
-
-When you run a fork with services configured, they are automatically registered with the proxy:
-
-```bash
-$ worklet switch my-fork
-
-Proxy URLs:
-  api: http://api.x7k9m2p4.fork.local.worklet.sh
-  frontend: http://app.x7k9m2p4.fork.local.worklet.sh
-
-Running: docker run --rm -it --name worklet-fork-abc123-api ...
-```
-
-#### Persistence and Management
-
-The proxy automatically persists all fork mappings to ensure consistency:
-
-- **Storage Location**: Mappings are saved in `~/.worklet/proxy/mappings.json`
-- **Automatic Saving**: Mappings are saved whenever forks are registered or unregistered
-- **Consistent URLs**: Each fork keeps the same random host identifier across restarts
-- **Persistence Benefits**:
-  - View all services with `worklet proxy list` even when containers are stopped
-  - Restart the proxy without losing service configurations
-  - Share consistent URLs with team members
-  
-To reset all mappings and start fresh:
-```bash
-rm ~/.worklet/proxy/mappings.json
-worklet proxy stop
-worklet proxy start
 ```
 
 ## Workflows
@@ -562,37 +413,21 @@ Configure and run applications with multiple services that need to communicate:
 }
 ```
 
-Start the proxy and run your services:
+Run your services:
 
 ```bash
-# Start the proxy server (one time)
-$ worklet proxy start
-Proxy started successfully
-
 # Fork and switch to your development environment
 $ worklet fork
 $ worklet switch 1
-
-Proxy URLs:
-  api: http://api.abc123xy.fork.local.worklet.sh
-  frontend: http://app.abc123xy.fork.local.worklet.sh
-  admin: http://admin.abc123xy.fork.local.worklet.sh
 
 # Inside the container, start your services
 /workspace # cd apps/api && npm start &
 /workspace # cd apps/frontend && npm start &
 /workspace # cd apps/admin && npm start &
 
-# Your services are now accessible via their unique URLs!
-# The frontend can call the API using its proxy URL
-# Share the URLs with team members for testing
+# Your services are now running inside the container
+# Access them directly via exposed ports
 ```
-
-The proxy automatically:
-- Routes requests to the correct container and port
-- Supports WebSocket connections
-- Handles multiple services per fork
-- Cleans up when the container stops
 
 ## Custom Docker Images
 
@@ -677,82 +512,6 @@ ls -la ~/.worklet/forks
 ### Docker-in-Docker Issues
 Ensure you're using `"isolation": "full"` and `"privileged": true` in your configuration.
 
-### Proxy Issues
-
-#### Proxy fails to start
-Ensure Docker is running and you have network permissions:
-```bash
-docker network ls  # Check Docker is accessible
-docker ps          # Check for conflicting containers
-```
-
-If nginx container already exists:
-```bash
-docker stop worklet-nginx-proxy
-docker rm worklet-nginx-proxy
-worklet proxy start
-```
-
-#### Services not accessible
-1. Check proxy is running:
-   ```bash
-   worklet proxy status
-   ```
-
-2. Ensure services are configured in `.worklet.jsonc`
-
-3. Verify the container is connected to the worklet network:
-   ```bash
-   docker inspect <container-name> | grep NetworkMode
-   ```
-
-4. Check service is actually running inside container on the configured port
-
-#### Network connectivity issues
-The proxy requires:
-- Docker network named `worklet-network` (created automatically)
-- Port 80 available on your host machine
-- Services running on the ports specified in configuration
-
-#### Proxy mappings issues
-If proxy mappings seem incorrect or outdated:
-1. Check the mappings file:
-   ```bash
-   cat ~/.worklet/proxy/mappings.json
-   ```
-
-2. Reset all mappings if needed:
-   ```bash
-   rm ~/.worklet/proxy/mappings.json
-   worklet proxy stop
-   worklet proxy start
-   ```
-
-3. Verify mappings are loaded:
-   ```bash
-   worklet proxy list
-   ```
-
-#### Debugging proxy issues
-Use the `--debug` flag to see detailed logging:
-```bash
-# Debug proxy startup issues
-worklet proxy --debug start
-
-# Debug why services aren't showing
-worklet proxy --debug list
-
-# Debug registration problems
-worklet proxy --debug register my-fork --service api:3000:api
-```
-
-Debug output includes:
-- Docker command execution details
-- Network creation/verification steps
-- Config file generation and paths
-- Container startup and health checks
-- Persistence file operations
-- Error context and stack traces
 
 ## Requirements
 

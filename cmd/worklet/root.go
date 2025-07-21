@@ -30,5 +30,4 @@ func init() {
 	rootCmd.AddCommand(switchCmd)
 	rootCmd.AddCommand(commitCmd)
 	rootCmd.AddCommand(linkCmd)
-	rootCmd.AddCommand(proxyCmd)
 }
