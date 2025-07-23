@@ -18,28 +18,30 @@ var terminalCmd = &cobra.Command{
 }
 
 var (
-	terminalPort     int
-	openBrowser      bool
+	terminalPort       int
+	openBrowser        bool
 	terminalCORSOrigin string
+	proxyEnabled       bool
 )
 
 func init() {
-	terminalCmd.Flags().IntVarP(&terminalPort, "port", "p", 8080, "Port to run the terminal server on")
+	terminalCmd.Flags().IntVarP(&terminalPort, "port", "p", 8181, "Port to run the terminal server on")
 	terminalCmd.Flags().BoolVarP(&openBrowser, "open", "o", true, "Open browser automatically")
 	terminalCmd.Flags().StringVar(&terminalCORSOrigin, "cors-origin", "*", "CORS allowed origin (use '*' to allow all origins)")
+	terminalCmd.Flags().BoolVar(&proxyEnabled, "proxy", false, "Enable reverse proxy for *.local.worklet.sh domains")
 	rootCmd.AddCommand(terminalCmd)
 }
 
 func runTerminal(cmd *cobra.Command, args []string) error {
 	server := terminal.NewServer(terminalPort)
-	
+
 	// Configure CORS
 	server.SetCORSOrigin(terminalCORSOrigin)
-	
+
 	url := fmt.Sprintf("http://localhost:%d", terminalPort)
 	fmt.Printf("Starting terminal server on %s\n", url)
 	fmt.Printf("CORS origin: %s\n", terminalCORSOrigin)
-	
+
 	// Open browser if requested
 	if openBrowser {
 		go func() {
@@ -48,7 +50,7 @@ func runTerminal(cmd *cobra.Command, args []string) error {
 			openURL(url)
 		}()
 	}
-	
+
 	// Start server (blocks)
 	return server.Start()
 }

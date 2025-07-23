@@ -1,0 +1,27 @@
+{
+  "fork": {
+    "name": "proxy-example",
+    "description": "Example configuration with services for proxy"
+  },
+  "run": {
+    "image": "node:18",
+    "command": ["sh"],
+    "initScript": [
+      "echo 'Starting example services...'",
+      "npx -y http-server -p 3000 &",
+      "npx -y json-server --port 3001 --watch /dev/null &"
+    ]
+  },
+  "services": [
+    {
+      "name": "web",
+      "port": 3000,
+      "subdomain": "app"
+    },
+    {
+      "name": "api",
+      "port": 3001,
+      "subdomain": "api"
+    }
+  ]
+}

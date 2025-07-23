@@ -16,13 +16,18 @@ import (
 //go:embed dind-entrypoint.sh
 var dindEntrypointScript string
 
-func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string, mountMode bool, cmdArgs ...string) error {
+func RunContainer(workDir string, cfg *config.WorkletConfig, sessionID string, mountMode bool, cmdArgs ...string) error {
 	var imageName string
 	var err error
 
+	// Ensure Docker network exists before running container
+	if err := EnsureNetworkExists(); err != nil {
+		return fmt.Errorf("failed to ensure Docker network exists: %w", err)
+	}
+
 	// In copy mode, build a temporary image with the workspace files
 	if !mountMode {
-		imageName, err = buildCopyImage(workDir, cfg, forkID)
+		imageName, err = buildCopyImage(workDir, cfg, sessionID)
 		if err != nil {
 			return fmt.Errorf("failed to build copy image: %w", err)
 		}
@@ -43,25 +48,21 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, forkID string, moun
 	// Build docker run command
 	args := []string{"run", "--rm", "-it"}
 
-	// Add container name if we have services configured
-	if len(cfg.Services) > 0 {
-		// For now, use the first service name as the container name
-		// In the future, we might want to run multiple containers
-		containerName := fmt.Sprintf("worklet-%s-%s", forkID, cfg.Services[0].Name)
-		args = append(args, "--name", containerName)
-
-		// Add to worklet network
-		args = append(args, "--network", "worklet-network")
-
-		// Expose ports
-		for _, service := range cfg.Services {
-			args = append(args, "-p", fmt.Sprintf("%d:%d", service.Port, service.Port))
-		}
+	// Add container name using project name and session ID
+	projectName := cfg.Name
+	if projectName == "" {
+		projectName = "worklet"
 	}
+	containerName := fmt.Sprintf("%s-%s", projectName, sessionID)
+	args = append(args, "--name", containerName)
 
-	// Add worklet fork labels for terminal discovery
-	args = append(args, "--label", "worklet.fork=true")
-	args = append(args, "--label", fmt.Sprintf("worklet.fork.id=%s", forkID))
+	// Add to worklet network for container-to-container communication
+	args = append(args, "--network", "worklet-network")
+
+	// Add worklet labels for terminal discovery
+	args = append(args, "--label", "worklet.session=true")
+	args = append(args, "--label", fmt.Sprintf("worklet.session.id=%s", sessionID))
+	args = append(args, "--label", fmt.Sprintf("worklet.project.name=%s", projectName))
 
 	// In mount mode, add volume mount
 	if mountMode {
@@ -219,9 +220,13 @@ func getEntrypointScriptPath() (string, error) {
 }
 
 // buildCopyImage builds a temporary Docker image with the workspace files copied in
-func buildCopyImage(workDir string, cfg *config.WorkletConfig, forkID string) (string, error) {
+func buildCopyImage(workDir string, cfg *config.WorkletConfig, sessionID string) (string, error) {
 	// Generate unique image name
-	imageName := fmt.Sprintf("worklet-temp-%s", forkID)
+	projectName := cfg.Name
+	if projectName == "" {
+		projectName = "worklet"
+	}
+	imageName := fmt.Sprintf("worklet-temp-%s-%s", projectName, sessionID)
 
 	// Get base image
 	baseImage := cfg.Run.Image
@@ -253,8 +258,8 @@ WORKDIR /workspace
 		return "", fmt.Errorf("failed to create workspace directory: %w", err)
 	}
 
-	// Copy files to build context, respecting .dockerignore and fork exclude patterns
-	if err := copyWorkspace(workDir, workspaceDir, cfg.Fork.Exclude); err != nil {
+	// Copy files to build context, respecting .dockerignore patterns
+	if err := copyWorkspace(workDir, workspaceDir, []string{}); err != nil {
 		return "", fmt.Errorf("failed to copy workspace: %w", err)
 	}
 
@@ -286,7 +291,7 @@ func copyWorkspace(src, dst string, excludePatterns []string) error {
 	// Always exclude .dockerignore itself
 	patterns = append(patterns, gitignore.ParsePattern(".dockerignore", nil))
 
-	// Add patterns from config (fork.exclude)
+	// Add patterns from excludePatterns parameter
 	for _, pattern := range excludePatterns {
 		pattern = strings.TrimSpace(pattern)
 		if pattern != "" && !strings.HasPrefix(pattern, "#") {

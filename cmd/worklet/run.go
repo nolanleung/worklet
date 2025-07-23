@@ -1,35 +1,38 @@
 package worklet
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
-	"path/filepath"
+	"os/exec"
+	"time"
 
 	"github.com/nolanleung/worklet/internal/config"
 	"github.com/nolanleung/worklet/internal/docker"
-	"github.com/nolanleung/worklet/internal/fork"
+	"github.com/nolanleung/worklet/pkg/daemon"
 	"github.com/spf13/cobra"
 )
 
 var (
 	mountMode bool
-	forkMode  bool
-	noFork    bool
+	tempMode  bool
 )
 
 var runCmd = &cobra.Command{
 	Use:   "run [command]",
-	Short: "Run the repository in an isolated fork with Docker-in-Docker support",
-	Long: `Creates an isolated copy (fork) of the repository and runs it in a Docker container with Docker-in-Docker capabilities based on .worklet.jsonc configuration.
+	Short: "Run the repository in a Docker container with Docker-in-Docker support",
+	Long: `Runs the repository in a Docker container with Docker-in-Docker capabilities based on .worklet.jsonc configuration.
 
-By default, worklet run creates a fork to ensure your source files are not modified. Use --no-fork to run directly in the source directory.
+By default, worklet run creates a persistent isolated environment. Use --mount to run directly in the current directory, or --temp to create a temporary environment that auto-cleans up.
 
 Examples:
-  worklet run                    # Run default shell
+  worklet run                    # Run in persistent isolated environment
+  worklet run --mount            # Run with current directory mounted
+  worklet run --temp             # Run in temporary environment
   worklet run echo "hello"       # Run echo command
   worklet run python app.py      # Run Python script
-  worklet run npm test           # Run npm test
-  worklet run --mount=false bash # Run bash in copy mode`,
+  worklet run npm test           # Run npm test`,
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, err := os.Getwd()
@@ -37,96 +40,173 @@ Examples:
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
 
-		// Handle conflicting flags
-		if noFork {
-			forkMode = false
+		// If mount mode, run directly in current directory
+		if mountMode {
+			return RunInDirectory(cwd, args...)
 		}
 
-		// If fork mode is enabled, create a fork first
-		if forkMode {
-			// Load config to get fork settings
-			cfg, err := config.LoadConfig(cwd)
-			if err != nil {
-				return fmt.Errorf("failed to load .worklet.jsonc: %w", err)
-			}
-
-			// Create a fork with auto-generated name
-			fmt.Println("Creating isolated fork for this run...")
-			forkPath, err := fork.CreateFork(cwd, cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create fork: %w", err)
-			}
-
-			// Extract fork ID from path (e.g., "fork-123" from the directory name)
-			forkID := filepath.Base(forkPath)
-			fmt.Printf("Running in fork: %s\n", forkID)
-
-			// Clean up fork after session if no changes were made
-			defer func() {
-				// Check if fork has changes before deleting
-				hasChanges, err := fork.HasChanges(forkPath)
-				if err != nil {
-					fmt.Printf("Warning: Failed to check for changes in fork %s: %v\n", forkID, err)
-					// Err on the side of caution, don't delete
-					return
-				}
-
-				if hasChanges {
-					fmt.Printf("\nFork %s has modifications and will be preserved.\n", forkID)
-					fmt.Printf("To remove it manually, run: worklet remove %s\n", forkID)
-				} else {
-					// No changes, safe to delete
-					if err := fork.RemoveFork(forkID); err != nil {
-						fmt.Printf("Warning: Failed to remove temporary fork %s: %v\n", forkID, err)
-					} else {
-						fmt.Printf("Cleaned up temporary fork: %s (no changes detected)\n", forkID)
-					}
-				}
-			}()
-
-			// Run in the fork directory
-			return RunInDirectoryWithForkID(forkPath, forkID, args...)
-		}
-
-		// Otherwise run in the current directory
+		// TODO: Implement isolated environment creation
+		// For now, just run in current directory
+		fmt.Println("Note: Isolated environment creation not yet implemented, running in current directory")
 		return RunInDirectory(cwd, args...)
 	},
 }
 
 func init() {
-	runCmd.Flags().BoolVar(&mountMode, "mount", true, "Mount workspace directory instead of copying files (allows real-time sync)")
-	runCmd.Flags().BoolVar(&forkMode, "fork", true, "Create an isolated fork before running (default: true)")
-	runCmd.Flags().BoolVar(&noFork, "no-fork", false, "Run directly in source directory without creating a fork")
+	runCmd.Flags().BoolVar(&mountMode, "mount", false, "Mount current directory instead of creating isolated environment")
+	runCmd.Flags().BoolVar(&tempMode, "temp", false, "Create temporary environment that auto-cleans up")
 }
 
 // RunInDirectory runs worklet in the specified directory
 func RunInDirectory(dir string, cmdArgs ...string) error {
-	return RunInDirectoryWithForkID(dir, "", cmdArgs...)
-}
-
-// RunInDirectoryWithForkID runs worklet in the specified directory with an optional fork ID
-func RunInDirectoryWithForkID(dir string, forkID string, cmdArgs ...string) error {
 	// Load config
 	cfg, err := config.LoadConfig(dir)
 	if err != nil {
 		return fmt.Errorf("failed to load .worklet.jsonc: %w", err)
 	}
 
-	// Generate a simple fork ID if not provided
-	if forkID == "" {
-		// For direct run command, use a simple ID
-		forkID = "run-" + generateSimpleID()
-	}
+	// Generate session ID
+	sessionID := generateSessionID()
+
+	// Register with daemon if it's running
+	registerWithDaemon(sessionID, dir, cfg)
+	
+	// Ensure we unregister on exit
+	defer func() {
+		unregisterFromDaemon(sessionID)
+	}()
 
 	// Run in Docker
-	if err := docker.RunContainer(dir, cfg, forkID, mountMode, cmdArgs...); err != nil {
+	if err := docker.RunContainer(dir, cfg, sessionID, mountMode, cmdArgs...); err != nil {
 		return fmt.Errorf("failed to run container: %w", err)
 	}
 
 	return nil
 }
 
-func generateSimpleID() string {
-	// Simple ID generation for run command
+func generateSessionID() string {
+	// Simple ID generation based on PID
 	return fmt.Sprintf("%d", os.Getpid())
+}
+
+func registerWithDaemon(sessionID, workDir string, cfg *config.WorkletConfig) {
+	socketPath := daemon.GetDefaultSocketPath()
+	
+	// Check if daemon is running
+	if !daemon.IsDaemonRunning(socketPath) {
+		// Try to auto-start daemon
+		if err := autoStartDaemon(); err != nil {
+			log.Printf("Failed to auto-start daemon: %v", err)
+			return
+		}
+	}
+	
+	// Connect to daemon
+	client := daemon.NewClient(socketPath)
+	if err := client.Connect(); err != nil {
+		log.Printf("Failed to connect to daemon: %v", err)
+		return
+	}
+	defer client.Close()
+	
+	// Prepare service info
+	var services []daemon.ServiceInfo
+	for _, svc := range cfg.Services {
+		services = append(services, daemon.ServiceInfo{
+			Name:      svc.Name,
+			Port:      svc.Port,
+			Subdomain: svc.Subdomain,
+		})
+	}
+	
+	// Register session (still using RegisterFork for now - will be updated when we refactor daemon)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	// Get project name from config
+	projectName := cfg.Name
+	if projectName == "" {
+		projectName = "worklet"
+	}
+	
+	req := daemon.RegisterForkRequest{
+		ForkID:      sessionID,
+		ProjectName: projectName,
+		WorkDir:     workDir,
+		Services:    services,
+	}
+	
+	if err := client.RegisterFork(ctx, req); err != nil {
+		log.Printf("Failed to register session with daemon: %v", err)
+		return
+	}
+	
+	// If we have services, display the URLs
+	if len(services) > 0 {
+		// Get project name from config
+		projectName := cfg.Name
+		if projectName == "" {
+			projectName = "worklet"
+		}
+		
+		fmt.Println("\nServices available at (via proxy on port 80):")
+		for _, svc := range services {
+			subdomain := svc.Subdomain
+			if subdomain == "" {
+				subdomain = svc.Name
+			}
+			fmt.Printf("  - http://%s.%s-%s.%s\n", subdomain, projectName, sessionID, config.WorkletDomain)
+		}
+		fmt.Println()
+		fmt.Println("Note: Services are only accessible through the nginx proxy, not directly on host ports.")
+	}
+}
+
+func unregisterFromDaemon(sessionID string) {
+	socketPath := daemon.GetDefaultSocketPath()
+	
+	// Check if daemon is running
+	if !daemon.IsDaemonRunning(socketPath) {
+		return
+	}
+	
+	// Connect to daemon
+	client := daemon.NewClient(socketPath)
+	if err := client.Connect(); err != nil {
+		return
+	}
+	defer client.Close()
+	
+	// Unregister session (still using UnregisterFork for now - will be updated when we refactor daemon)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	if err := client.UnregisterFork(ctx, sessionID); err != nil {
+		log.Printf("Failed to unregister session from daemon: %v", err)
+	}
+}
+
+func autoStartDaemon() error {
+	// Get executable path
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+	
+	// Start daemon
+	cmd := exec.Command(exePath, "daemon", "start")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
+	}
+	
+	// Wait for daemon to be ready
+	socketPath := daemon.GetDefaultSocketPath()
+	for i := 0; i < 10; i++ {
+		if daemon.IsDaemonRunning(socketPath) {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	
+	return fmt.Errorf("daemon failed to start")
 }

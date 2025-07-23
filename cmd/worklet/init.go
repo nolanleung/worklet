@@ -76,7 +76,7 @@ func generateConfig(projectName string, minimal bool) string {
     "exclude": ["*.log", ".DS_Store", "*.tmp", "*.swp"]
   },
   "run": {
-    "image": "docker:dind",
+    "image": "worklet/base:latest",
     "isolation": "full",
     "initScript": ["echo 'Container started'"]
   }
@@ -104,8 +104,8 @@ func generateConfig(projectName string, minimal bool) string {
     ]
   },
   "run": {
-    // Docker image to use (defaults to docker:dind if not specified)
-    "image": "docker:dind",
+    // Docker image to use (defaults to worklet/base:latest if not specified)
+    "image": "worklet/base:latest",
     
     // Isolation mode: "full" (default) or "shared"
     // - "full": Runs a separate Docker daemon inside the container (true isolation)

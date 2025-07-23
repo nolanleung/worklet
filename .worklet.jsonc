@@ -1,20 +1,12 @@
 {
   "fork": {
     "description": "Development fork for testing",
-    "exclude": [
-      "node_modules",
-      "*.log",
-      ".DS_Store",
-      "dist",
-      "build"
-    ],
+    "exclude": ["node_modules", "*.log", ".DS_Store", "dist", "build"],
     "includeGit": true,
     "name": "worklet"
   },
   "run": {
-    "command": [
-      "bash"
-    ],
+    "command": ["bash"],
     "credentials": {
       "claude": true
     },

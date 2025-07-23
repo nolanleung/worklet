@@ -9,8 +9,8 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "worklet",
-	Short: "A CLI tool for managing repository forks and Docker containers",
-	Long:  `Worklet helps you fork repositories and run them in Docker containers with Docker-in-Docker support.`,
+	Short: "A CLI tool for running projects in Docker containers",
+	Long:  `Worklet helps you run projects in Docker containers with Docker-in-Docker support.`,
 }
 
 func Execute() {
@@ -22,12 +22,8 @@ func Execute() {
 
 func init() {
 	rootCmd.AddCommand(initCmd)
-	rootCmd.AddCommand(forkCmd)
 	rootCmd.AddCommand(runCmd)
-	rootCmd.AddCommand(listCmd)
-	rootCmd.AddCommand(removeCmd)
-	rootCmd.AddCommand(cleanCmd)
-	rootCmd.AddCommand(switchCmd)
-	rootCmd.AddCommand(commitCmd)
 	rootCmd.AddCommand(linkCmd)
+	rootCmd.AddCommand(daemonCmd)
+	rootCmd.AddCommand(terminalCmd)
 }

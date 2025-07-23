@@ -15,16 +15,16 @@ import (
 var webAssets embed.FS
 
 type Server struct {
-	port        int
-	manager     *SessionManager
-	corsOrigin  string
+	port         int
+	manager      *SessionManager
+	corsOrigin   string
 }
 
 func NewServer(port int) *Server {
 	return &Server{
-		port:       port,
-		manager:    NewSessionManager(),
-		corsOrigin: "*", // Default to allow all origins
+		port:         port,
+		manager:      NewSessionManager(),
+		corsOrigin:   "*", // Default to allow all origins
 	}
 }
 
@@ -32,6 +32,8 @@ func NewServer(port int) *Server {
 func (s *Server) SetCORSOrigin(origin string) {
 	s.corsOrigin = origin
 }
+
+
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -80,15 +82,16 @@ func (s *Server) handleForks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	forks, err := ListForks()
+	sessions, err := ListSessions()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(forks)
+	json.NewEncoder(w).Encode(sessions)
 }
+
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Extract fork ID from path
