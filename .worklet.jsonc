@@ -1,40 +1,22 @@
 {
-  // Worklet configuration file
   "fork": {
-    "name": "worklet",
     "description": "Development fork for testing",
-    "includeGit": true,  // Include .git directory for full Git workflow (default: true)
-    "exclude": [
-      "node_modules",
-      "*.log",
-      ".DS_Store",
-      "dist",
-      "build"
-      // ".git"  // Uncomment to exclude Git repository
-    ]
+    "exclude": ["node_modules", "*.log", ".DS_Store", "dist", "build"],
+    "includeGit": true,
+    "name": "worklet"
   },
   "run": {
-    // Docker image to use (defaults to docker:dind if not specified)
-    "image": "docker:dind",
-    
-    // Isolation mode: "full" (default) or "shared"
-    // - "full": Runs a separate Docker daemon inside the container (true isolation)
-    // - "shared": Mounts host Docker socket (containers run on host)
-    "isolation": "full",
-    
-    // Command to run in the container
-    "command": ["sh"],
-    
-    // Environment variables
-    "environment": {
-      "DOCKER_TLS_CERTDIR": "",
-      "DOCKER_DRIVER": "overlay2"
+    "command": ["bash"],
+    "credentials": {
+      "claude": true
     },
-    
-    // Additional volume mounts
-    "volumes": [],
-    
-    // Run in privileged mode (required for "full" isolation mode)
-    "privileged": true
+    "environment": {
+      "DOCKER_DRIVER": "overlay2",
+      "DOCKER_TLS_CERTDIR": ""
+    },
+    "image": "worklet/base:latest",
+    "isolation": "full",
+    "privileged": true,
+    "volumes": []
   }
 }

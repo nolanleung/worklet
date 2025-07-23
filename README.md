@@ -1,14 +1,14 @@
 # Worklet
 
-A powerful tool for creating isolated development environments. Fork your repository, test changes in Docker containers, and seamlessly integrate results back into your Git workflow.
+A powerful tool for running projects in isolated Docker containers with Docker-in-Docker support.
 
 ## Why Worklet?
 
-- **Isolated Testing**: Test changes without affecting your main repository
+- **Isolated Environments**: Run your project in clean Docker containers
 - **Docker-in-Docker**: Run complex Docker workflows in complete isolation
-- **Git Integration**: Commit and push changes directly from forks
+- **Service Discovery**: Automatic subdomain routing for multi-service projects
 - **Zero Configuration**: Works out of the box with sensible defaults
-- **Fast Switching**: Jump between different test environments instantly
+- **Real-time Development**: Mount mode for live code changes
 
 ## Quick Start
 
@@ -19,17 +19,14 @@ go install github.com/nolanleung/worklet@latest
 # Initialize configuration  
 worklet init
 
-# Fork your current repository
-worklet fork
+# Run your project in an isolated container
+worklet run
 
-# Switch to the fork and run in Docker
-worklet switch 1
+# Or run with your local directory mounted
+worklet run --mount
 
-# You're now in an isolated Docker environment!
-# Make changes, run tests, experiment freely
-
-# When done, commit and push your changes with one command
-worklet commit -a -b feature/tested-change -m "Tested feature" --push
+# Run a specific command
+worklet run npm test
 ```
 
 ## Installation
@@ -52,28 +49,22 @@ sudo mv worklet /usr/local/bin/
 ## Features
 
 ### 🚀 **Instant Isolated Environments**
-Create a complete copy of your repository with one command. Each fork is isolated, allowing you to experiment without fear.
+Run your project in a clean Docker container with one command. Each session is isolated, allowing you to experiment without fear.
 
 ### 🐳 **True Docker-in-Docker Support**
 - **Full isolation mode** (default): Runs a separate Docker daemon inside the container
 - **Shared mode**: Uses host Docker daemon for resource efficiency
 - Perfect for testing Docker Compose setups, building images, or running containerized tests
 
-### 📊 **Visual Progress Tracking**
-Watch your fork creation progress with a real-time progress bar showing files copied and size.
+### 🔧 **Flexible Run Modes**
+- **Isolated mode** (default): Creates a persistent isolated environment
+- **Mount mode** (`--mount`): Mounts your current directory for real-time development
+- **Temporary mode** (`--temp`): Creates a temporary environment that auto-cleans up
 
-### 🔧 **Comprehensive Fork Management**
-- List all forks with sizes and creation times
-- Remove specific forks or clean up old ones
-- Switch between forks instantly
-- Monitor disk usage easily
-
-### 📝 **Git Workflow Integration**
-Forks include the complete `.git` directory, enabling you to:
-- Create feature branches from experimental work
-- Commit changes made during testing
-- Push directly to remote repositories
-- Maintain full Git history
+### 🌐 **Service Discovery & Routing**
+- Automatic subdomain routing for multi-service projects
+- Access services via `service.project-name.worklet.sh`
+- Built-in proxy server for local development
 
 ### 🔌 **Self-Contained Binary**
 The worklet binary includes all necessary scripts. No external dependencies beyond Docker.
@@ -81,338 +72,299 @@ The worklet binary includes all necessary scripts. No external dependencies beyo
 ### 🚀 **Init Scripts**
 Run initialization commands automatically when containers start - perfect for installing dependencies, setting up tools, or configuring the environment.
 
+
 ## Configuration
 
 Create a `.worklet.jsonc` file in your repository root:
 
 ```jsonc
 {
-  "fork": {
-    "name": "my-project",
-    "description": "Testing new features",
-    "includeGit": true,     // Include .git directory (default: true)
-    "exclude": [            // Patterns to exclude from fork
-      "node_modules",
-      "*.log",
-      ".DS_Store",
-      "dist",
-      "build"
-    ]
-  },
+  "name": "my-project",     // Project name for container naming
   "run": {
-    "image": "docker:dind",              // Docker image to use
-    "isolation": "full",                 // "full" or "shared"
-    "command": ["sh"],                   // Command to run
-    "initScript": [                      // Commands to run on container start
-      "apt-get update",
-      "apt-get install -y nodejs npm",
-      "npm install -g yarn"
-    ],
-    "environment": {                     // Environment variables
-      "DOCKER_TLS_CERTDIR": "",
-      "DOCKER_DRIVER": "overlay2"
+    "image": "docker:dind",          // Base Docker image (default: docker:dind)
+    "privileged": true,              // Run with Docker-in-Docker
+    "isolation": "full",             // "full" for DinD, "shared" for socket mount
+    "command": ["/bin/sh"],          // Default command (optional)
+    "environment": {                 // Environment variables
+      "NODE_ENV": "development",
+      "DEBUG": "true"
     },
-    "volumes": [],                       // Additional volume mounts
-    "privileged": true                   // Required for Docker-in-Docker
-  }
+    "volumes": [                     // Additional volume mounts
+      "/var/lib/mysql"
+    ],
+    "initScript": [                  // Commands to run on container start
+      "apk add --no-cache nodejs npm python3",
+      "npm install -g pnpm",
+      "echo 'Welcome to Worklet!'"
+    ],
+    "credentials": {
+      "claude": true                 // Mount Claude credentials if available
+    }
+  },
+  "services": [                      // Services exposed by your project
+    {
+      "name": "web",
+      "port": 3000,
+      "subdomain": "app"             // Access via app.my-project.worklet.sh
+    },
+    {
+      "name": "api", 
+      "port": 3001,
+      "subdomain": "api"             // Access via api.my-project.worklet.sh
+    }
+  ]
 }
 ```
 
-## Commands
+## Command Reference
 
 ### `worklet init`
 Initialize a new `.worklet.jsonc` configuration file.
 
 ```bash
-worklet init                    # Create config with defaults
-worklet init --minimal          # Create minimal config
-worklet init --force            # Overwrite existing config
-```
-
-Creates a `.worklet.jsonc` configuration file with sensible defaults.
-
-### `worklet fork`
-Create a fork of the current repository.
-
-```bash
-worklet fork
-# Output: Fork created at: /Users/you/.worklet/forks/fork-abc123
+worklet init
+# Creates .worklet.jsonc with default configuration
 ```
 
 ### `worklet run`
-Run the current directory in a Docker container.
+Run your project in a Docker container.
 
 ```bash
-worklet run
-# Starts Docker container with your configuration
+worklet run                      # Run in isolated environment
+worklet run --mount              # Run with current directory mounted
+worklet run --temp               # Run in temporary environment
+worklet run npm test             # Run specific command
+worklet run --mount npm start    # Run with mount and command
 ```
 
-### `worklet switch [fork]`
-Switch to a fork and run it in Docker immediately.
+### `worklet terminal`
+Start a web-based terminal server for browser-based access to containers.
 
 ```bash
-worklet switch                  # Interactive selection
-worklet switch 1                # By index (from list)
-worklet switch fork-abc123      # By fork ID
-worklet switch my-project       # By name
-worklet switch --print-path 1   # Just print path (for scripts)
+worklet terminal                 # Start terminal server on port 7681
+worklet terminal --port 8080     # Use custom port
+worklet terminal --proxy          # Enable service proxy
 ```
 
-### `worklet list`
-List all forks with details.
+Features:
+- Browser-based terminal with full TTY support
+- Automatic container discovery
+- Service proxy for accessing project services via subdomains
+
+### `worklet link`
+Link external tools and services to your worklet configuration.
 
 ```bash
-worklet list                    # Table view
-worklet list --json            # JSON output
-worklet list --verbose         # Detailed information
+worklet link claude              # Enable Claude in worklet configuration
+worklet link claude --force      # Force overwrite existing Claude settings
 ```
 
-Example output:
-```
-FORK ID         NAME           CREATED        SIZE      SOURCE
-fork-abc123     my-project     2 hours ago    125.3 MB  /Users/you/project
-fork-def456     experiment     1 day ago      89.2 MB   /Users/you/project
+The link command adds necessary credential settings to your `.worklet.jsonc` configuration.
 
-Total: 2 forks (214.5 MB)
-```
-
-### `worklet remove [fork-ids...]`
-Remove specific forks.
+### `worklet credentials`
+Manage credentials for external services used by worklet.
 
 ```bash
-worklet remove fork-abc123              # Single fork
-worklet remove fork-abc fork-def       # Multiple forks
-worklet remove fork-abc123 --force     # Skip confirmation
+worklet credentials claude       # Configure Claude API credentials
 ```
 
-### `worklet clean`
-Clean up forks.
+This command securely stores credentials that can be mounted into worklet containers when `credentials.claude` is enabled in your configuration.
+
+### `worklet daemon`
+Manage the worklet daemon for service discovery and proxy routing.
 
 ```bash
-worklet clean                    # Remove all forks
-worklet clean --older-than 7     # Remove forks older than 7 days
-worklet clean --dry-run          # Preview what would be deleted
-worklet clean --force            # Skip confirmation
+worklet daemon start        # Start the daemon
+worklet daemon stop         # Stop the daemon  
+worklet daemon status       # Check daemon status
 ```
 
-### `worklet commit [fork]`
-Commit changes in a worklet fork with Git operations.
+The daemon:
+- Manages session registrations via Unix socket at `~/.worklet/worklet.sock`
+- Enables automatic service discovery
+- Persists session state across daemon restarts
 
-```bash
-worklet commit                           # Commit in current fork (interactive)
-worklet commit -m "Fix bug"              # Commit with message
-worklet commit 1 -m "Add feature"        # Commit in fork by index
-worklet commit fork-abc123 -m "Update"   # Commit by fork ID
-worklet commit -a -m "Fix all issues"    # Stage all changes and commit
-worklet commit -b feature/new -m "Add"   # Create branch and commit
-worklet commit -m "Complete" --push      # Commit and push to remote
-```
+## Configuration Examples
 
-Options:
-- `-m, --message`: Commit message (prompts if not provided)
-- `-a, --all`: Stage all changes before committing
-- `-b, --branch`: Create and switch to new branch before committing
-- `--push`: Push to remote after committing
+### Basic Node.js Project
 
-Example workflow:
-```bash
-# After testing in a fork
-$ worklet commit -a -b feature/tested -m "Tested feature implementation" --push
-Current git status:
-M  src/app.js
-A  src/newfeature.js
-Staging all changes...
-Creating and switching to branch: feature/tested
-Committing with message: Tested feature implementation
-Pushing to origin/feature/tested...
-Successfully committed changes in fork: /Users/you/.worklet/forks/fork-abc123
-```
-
-### `worklet link <tool>`
-Link external tools to your worklet configuration.
-
-Currently supported tools:
-- `claude`: Links Claude Code authentication
-
-```bash
-worklet link claude             # Link Claude authentication
-worklet link claude --force     # Force overwrite existing mounts
-```
-
-#### Linking Claude Code
-
-The `worklet link claude` command adds a volume mount for your Claude authentication directory to the worklet configuration, allowing you to use Claude Code inside containers.
-
-```bash
-# Link Claude to your worklet
-$ worklet link claude
-Successfully linked Claude authentication to worklet configuration.
-Added volume mount: /Users/you/.claude:/root/.claude:ro
-
-# Now you can use Claude in your containers
-$ worklet switch my-fork
-/workspace # claude --help
-/workspace # claude "explain this code"
-```
-
-This modifies your `.worklet.jsonc` to include:
 ```jsonc
 {
+  "name": "my-node-app",
   "run": {
-    "volumes": [
-      "/Users/you/.claude:/root/.claude:ro"
+    "image": "node:18",
+    "initScript": [
+      "npm install"
+    ]
+  },
+  "services": [
+    {
+      "name": "app",
+      "port": 3000
+    }
+  ]
+}
+```
+
+### Python Development Environment
+
+```jsonc
+{
+  "name": "python-ml",
+  "run": {
+    "image": "python:3.11",
+    "environment": {
+      "PYTHONUNBUFFERED": "1"
+    },
+    "initScript": [
+      "pip install -r requirements.txt",
+      "python -m nltk.downloader punkt"
     ]
   }
+}
+```
+
+### Multi-Service Application
+
+```jsonc
+{
+  "name": "microservices",
+  "run": {
+    "image": "docker:dind",
+    "isolation": "full",
+    "initScript": [
+      "apk add --no-cache docker-compose",
+      "docker-compose up -d"
+    ]
+  },
+  "services": [
+    {
+      "name": "frontend",
+      "port": 3000,
+      "subdomain": "app"
+    },
+    {
+      "name": "api", 
+      "port": 8080,
+      "subdomain": "api"
+    },
+    {
+      "name": "admin",
+      "port": 3001,
+      "subdomain": "admin"
+    }
+  ]
 }
 ```
 
 ## Workflows
 
-### Testing a Risky Change
+### Development Workflow
 
 ```bash
-# 1. Fork your repository
-$ worklet fork
-Fork created at: /Users/you/.worklet/forks/fork-abc123
+# Start development with live reload
+$ worklet run --mount npm run dev
 
-# 2. Switch to the fork (runs in Docker)
-$ worklet switch fork-abc123
-Starting Docker daemon in full isolation mode...
+# Your app is now running with:
+# - Live code reloading
+# - Full Docker-in-Docker support
+# - Automatic service discovery
 
-# 3. Make your risky changes
-/workspace # rm -rf old-module/
-/workspace # docker-compose up -d
-/workspace # npm test
-
-# 4. If successful, commit from the fork
-/workspace # exit
-$ worklet commit -a -b feature/remove-old-module -m "Removed old module, all tests pass" --push
+# Access your services:
+# - http://app.my-project-12345.worklet.sh
+# - http://api.my-project-12345.worklet.sh
 ```
 
-### Testing Docker Compose Setups
+### Testing Workflow
 
 ```bash
-# Your docker-compose.yml is completely isolated
-$ worklet switch my-fork
-/workspace # docker-compose up -d
-/workspace # docker ps  # Only shows containers in this isolated environment
-/workspace # docker-compose down
+# Run tests in isolated environment
+$ worklet run npm test
+
+# Run integration tests with Docker Compose
+$ worklet run docker-compose run tests
+
+# Run tests in temporary environment
+$ worklet run --temp npm test
 ```
 
-### Parallel Testing
+### CI/CD Simulation
 
 ```bash
-# Fork multiple times for parallel experiments
-$ worklet fork && worklet fork && worklet fork
+# Test your CI pipeline locally
+$ worklet run ./scripts/ci.sh
 
-# List your forks
-$ worklet list
-FORK ID         NAME           CREATED
-fork-abc123     my-project     just now
-fork-def456     my-project     just now  
-fork-ghi789     my-project     just now
-
-# Run different tests in each fork
-$ worklet switch 1  # Test configuration A
-$ worklet switch 2  # Test configuration B
-$ worklet switch 3  # Test configuration C
+# Full isolation ensures no side effects
+# See exactly what your CI server sees
 ```
 
-### Using Init Scripts
+## Tips & Tricks
 
-Configure automatic dependency installation:
+### Shell Aliases
 
-```jsonc
-// .worklet.jsonc
-{
-  "run": {
-    "image": "node:18",
-    "initScript": [
-      "npm install",                    // Install project dependencies
-      "npm install -g typescript",      // Install global tools
-      "npx playwright install"          // Set up test browsers
-    ]
-  }
-}
-```
-
-Now when you run:
-```bash
-$ worklet switch my-fork
-Running initialization script...
-npm install
-✓ Dependencies installed
-npm install -g typescript
-✓ TypeScript installed globally
-npx playwright install
-✓ Playwright browsers installed
-
-# Your environment is ready to use!
-/workspace #
-```
-
-## Shell Integration
-
-### Quick Fork Directory Access
-
-Add to your `~/.bashrc` or `~/.zshrc`:
+Add these to your shell configuration:
 
 ```bash
-# Change directory to a fork
-wcd() {
-    local path=$(worklet switch --print-path "$@")
-    if [ $? -eq 0 ] && [ -n "$path" ]; then
-        cd "$path"
-        echo "Changed to: $path"
-    fi
-}
+# Quick run commands
+alias wr='worklet run'
+alias wrm='worklet run --mount'
+alias wrt='worklet run --temp'
 
-# List and cd to a fork
-wl() {
-    worklet list
-    echo -n "Enter fork number: "
-    read num
-    wcd $num
-}
+# Terminal access
+alias wt='worklet terminal'
 ```
 
-## Tips and Best Practices
+### Best Practices
 
-1. **Regular Cleanup**: Use `worklet clean --older-than 7` weekly to manage disk space
-2. **Naming Forks**: Use descriptive names in `.worklet.jsonc` for easier identification
-3. **Git Strategy**: Create feature branches directly from forks after successful testing
-4. **Disk Space**: Monitor with `worklet list` - fork sizes include the full `.git` directory
-5. **Performance**: Exclude large directories (like `node_modules`) for faster forking
+1. **Project Names**: Set meaningful names in `.worklet.jsonc` for easier identification
+2. **Mount Mode**: Use `--mount` for development, default mode for testing
+3. **Init Scripts**: Keep them minimal for faster container startup
+4. **Services**: Define all exposed ports for automatic discovery
 
-## Troubleshooting
+## Architecture
 
-### Docker Permission Denied
-Ensure your user is in the docker group:
-```bash
-sudo usermod -aG docker $USER
-# Log out and back in
-```
+Worklet uses a client-server architecture:
 
-### Fork Creation Fails
-Check disk space and permissions:
-```bash
-df -h ~/.worklet
-ls -la ~/.worklet/forks
-```
+- **CLI**: The main `worklet` command that users interact with
+- **Daemon**: Background process for service discovery and session management  
+- **Terminal Server**: Web-based terminal and proxy server
+- **Docker Integration**: Manages containers with proper isolation
 
-### Docker-in-Docker Issues
-Ensure you're using `"isolation": "full"` and `"privileged": true` in your configuration.
+For advanced proxy configuration and service routing, see the [nginx proxy setup documentation](docs/nginx-proxy-setup.md).
 
 ## Requirements
 
-- Go 1.21 or later (for building from source)
-- Docker installed and running
-- Sufficient disk space for forks
+- Docker Desktop or Docker Engine
+- macOS, Linux, or Windows with WSL2
+- Go 1.21+ (for building from source)
 
-## License
+## Troubleshooting
 
-MIT License - see LICENSE file for details.
+### Container Won't Start
+
+Check Docker is running:
+```bash
+docker ps
+```
+
+### Permission Denied
+
+Ensure your user is in the docker group:
+```bash
+sudo usermod -aG docker $USER
+```
+
+### Port Already in Use
+
+Check what's using the port:
+```bash
+lsof -i :3000
+```
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details.
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.
