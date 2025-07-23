@@ -4,19 +4,26 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/nolanleung/worklet/internal/config"
 	"github.com/nolanleung/worklet/internal/docker"
 	"github.com/nolanleung/worklet/pkg/daemon"
+	"github.com/nolanleung/worklet/pkg/terminal"
 	"github.com/spf13/cobra"
 )
 
 var (
-	mountMode bool
-	tempMode  bool
+	mountMode          bool
+	tempMode           bool
+	withTerminal       bool
+	noTerminal         bool
+	openTerminal       bool
+	runTerminalPort    int
 )
 
 var runCmd = &cobra.Command{
@@ -40,6 +47,11 @@ Examples:
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
 
+		// Handle conflicting flags
+		if withTerminal && noTerminal {
+			withTerminal = false
+		}
+
 		// If mount mode, run directly in current directory
 		if mountMode {
 			return RunInDirectory(cwd, args...)
@@ -55,6 +67,10 @@ Examples:
 func init() {
 	runCmd.Flags().BoolVar(&mountMode, "mount", false, "Mount current directory instead of creating isolated environment")
 	runCmd.Flags().BoolVar(&tempMode, "temp", false, "Create temporary environment that auto-cleans up")
+	runCmd.Flags().BoolVarP(&withTerminal, "with-terminal", "t", true, "Start terminal server for web-based container access")
+	runCmd.Flags().BoolVar(&noTerminal, "no-terminal", false, "Disable terminal server")
+	runCmd.Flags().BoolVar(&openTerminal, "open-terminal", false, "Open terminal in browser automatically")
+	runCmd.Flags().IntVar(&runTerminalPort, "terminal-port", 8181, "Port for terminal server (default: 8181)")
 }
 
 // RunInDirectory runs worklet in the specified directory
@@ -67,6 +83,15 @@ func RunInDirectory(dir string, cmdArgs ...string) error {
 
 	// Generate session ID
 	sessionID := generateSessionID()
+
+	// Handle terminal server if enabled
+	shouldStartTerminal := withTerminal && !noTerminal
+	if shouldStartTerminal {
+		if err := startOrConnectTerminalServer(sessionID); err != nil {
+			// Don't fail the run command if terminal server fails
+			log.Printf("Warning: Failed to start terminal server: %v", err)
+		}
+	}
 
 	// Register with daemon if it's running
 	registerWithDaemon(sessionID, dir, cfg)
@@ -209,4 +234,109 @@ func autoStartDaemon() error {
 	}
 	
 	return fmt.Errorf("daemon failed to start")
+}
+
+func startOrConnectTerminalServer(sessionID string) error {
+	// Clean any stale lock files first
+	if err := terminal.CleanStaleLockFile(); err != nil {
+		return fmt.Errorf("failed to clean stale lock file: %w", err)
+	}
+
+	// Check if terminal server is already running
+	lockInfo, running, err := terminal.IsTerminalRunning()
+	if err != nil {
+		return fmt.Errorf("failed to check terminal status: %w", err)
+	}
+
+	var port int
+	if running && lockInfo != nil {
+		// Terminal server is already running
+		port = lockInfo.Port
+		fmt.Printf("Terminal already running at: http://localhost:%d\n", port)
+		fmt.Printf("Connect to session: %s\n", sessionID)
+	} else {
+		// Start new terminal server
+		port = runTerminalPort
+		if err := startTerminalServer(port); err != nil {
+			return fmt.Errorf("failed to start terminal server: %w", err)
+		}
+		fmt.Printf("Starting terminal server at: http://localhost:%d\n", port)
+		fmt.Printf("Connect to session: %s\n", sessionID)
+	}
+
+	// Open browser if requested
+	if openTerminal {
+		url := fmt.Sprintf("http://localhost:%d", port)
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			openBrowserURL(url)
+		}()
+	}
+
+	return nil
+}
+
+func startTerminalServer(port int) error {
+	// Check if port is available
+	if !isPortAvailable(port) {
+		return fmt.Errorf("port %d is already in use", port)
+	}
+
+	// Get executable path
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	// Start terminal server in background
+	cmd := exec.Command(exePath, "terminal", "-p", fmt.Sprintf("%d", port), "--cors-origin", "*")
+	
+	// Set up to run in background
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.Stdin = nil
+	
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start terminal server: %w", err)
+	}
+
+	// Create lock file with the process PID
+	if err := terminal.CreateLockFile(port); err != nil {
+		// Try to kill the process if lock file creation fails
+		cmd.Process.Kill()
+		return fmt.Errorf("failed to create lock file: %w", err)
+	}
+
+	// Wait a bit to ensure server is ready
+	time.Sleep(500 * time.Millisecond)
+
+	return nil
+}
+
+func isPortAvailable(port int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
+	}
+	ln.Close()
+	return true
+}
+
+func openBrowserURL(url string) error {
+	var cmd string
+	var args []string
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd = "cmd"
+		args = []string{"/c", "start", url}
+	case "darwin":
+		cmd = "open"
+		args = []string{url}
+	default: // "linux", "freebsd", "openbsd", "netbsd"
+		cmd = "xdg-open"
+		args = []string{url}
+	}
+
+	return exec.Command(cmd, args...).Start()
 }
