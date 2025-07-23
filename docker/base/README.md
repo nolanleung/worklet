@@ -1,15 +1,15 @@
-# Worklet Docker Image with Claude Code
+# Worklet Base Docker Image
 
-This directory contains a Dockerfile that builds a Docker-in-Docker image with Claude Code pre-installed.
+This directory contains the Dockerfile for the worklet base image with Docker-in-Docker support.
 
 ## Building the Image
 
 ```bash
 # From the worklet root directory
-docker build -t worklet/dind-claude-code:latest docker/with-claude-code/
+docker build -t worklet/base:latest docker/base/
 
 # Or with a custom tag
-docker build -t myregistry/worklet-claude:v1.0 docker/with-claude-code/
+docker build -t myregistry/worklet-base:v1.0 docker/base/
 ```
 
 ## Using the Image
@@ -30,29 +30,30 @@ docker build -t myregistry/worklet-claude:v1.0 docker/with-claude-code/
 }
 ```
 
-3. Link your Claude authentication (if not already done):
+3. Configure Claude credentials (if needed):
 
 ```bash
+worklet credentials claude
 worklet link claude
 ```
 
-4. Run your worklet fork:
+4. Run your worklet environment:
 
 ```bash
-worklet switch my-fork
-# Claude is now available in the container
-/workspace # claude --help
+worklet run
+# Docker-in-Docker is now available in the container
+/workspace # docker --version
 ```
 
 ## What's Included
 
 - Docker-in-Docker functionality (from `docker:dind`)
-- Claude Code CLI (`/usr/local/bin/claude`)
-- Essential dependencies for Claude Code
-- Support for mounting Claude authentication via `worklet link claude`
+- Essential build tools and utilities
+- Support for multiple package managers (npm, pnpm, bun)
+- Support for mounting Claude credentials when configured via `worklet link claude`
 
 ## Notes
 
 - The image is based on Alpine Linux for a smaller size
-- Claude authentication must be linked separately using `worklet link claude`
+- Claude authentication must be configured separately using `worklet credentials claude` and `worklet link claude`
 - The worklet entrypoint script is mounted at runtime, preserving all worklet functionality

@@ -151,6 +151,25 @@ Features:
 - Automatic container discovery
 - Service proxy for accessing project services via subdomains
 
+### `worklet link`
+Link external tools and services to your worklet configuration.
+
+```bash
+worklet link claude              # Enable Claude in worklet configuration
+worklet link claude --force      # Force overwrite existing Claude settings
+```
+
+The link command adds necessary credential settings to your `.worklet.jsonc` configuration.
+
+### `worklet credentials`
+Manage credentials for external services used by worklet.
+
+```bash
+worklet credentials claude       # Configure Claude API credentials
+```
+
+This command securely stores credentials that can be mounted into worklet containers when `credentials.claude` is enabled in your configuration.
+
 ### `worklet daemon`
 Manage the worklet daemon for service discovery and proxy routing.
 
@@ -310,6 +329,8 @@ Worklet uses a client-server architecture:
 - **Daemon**: Background process for service discovery and session management  
 - **Terminal Server**: Web-based terminal and proxy server
 - **Docker Integration**: Manages containers with proper isolation
+
+For advanced proxy configuration and service routing, see the [nginx proxy setup documentation](docs/nginx-proxy-setup.md).
 
 ## Requirements
 
