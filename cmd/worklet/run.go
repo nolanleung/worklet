@@ -18,12 +18,12 @@ import (
 )
 
 var (
-	mountMode          bool
-	tempMode           bool
-	withTerminal       bool
-	noTerminal         bool
-	openTerminal       bool
-	runTerminalPort    int
+	mountMode       bool
+	tempMode        bool
+	withTerminal    bool
+	noTerminal      bool
+	openTerminal    bool
+	runTerminalPort int
 )
 
 var runCmd = &cobra.Command{
@@ -81,8 +81,8 @@ func RunInDirectory(dir string, cmdArgs ...string) error {
 		return fmt.Errorf("failed to load .worklet.jsonc: %w", err)
 	}
 
-	// Generate session ID
-	sessionID := generateSessionID()
+	// Get session ID from daemon or generate fallback
+	sessionID := getSessionID()
 
 	// Handle terminal server if enabled
 	shouldStartTerminal := withTerminal && !noTerminal
@@ -93,30 +93,117 @@ func RunInDirectory(dir string, cmdArgs ...string) error {
 		}
 	}
 
+	// Get isolation mode
+	isolation := cfg.Run.Isolation
+	if isolation == "" {
+		isolation = "full"
+	}
+
+	// Start docker-compose services if configured
+	composeStarted := false
+	composePath := getComposePath(dir, cfg)
+	if composePath != "" {
+		projectName := cfg.Name
+		if projectName == "" {
+			projectName = "worklet"
+		}
+
+		if err := docker.StartComposeServices(dir, composePath, sessionID, projectName, isolation); err != nil {
+			log.Printf("Warning: Failed to start compose services: %v", err)
+		} else {
+			composeStarted = true
+			if isolation == "full" {
+				fmt.Printf("Docker-compose services will be started inside the container from: %s\n", composePath)
+			} else {
+				fmt.Printf("Started docker-compose services from: %s\n", composePath)
+			}
+		}
+	}
+
 	// Register with daemon if it's running
-	registerWithDaemon(sessionID, dir, cfg)
-	
-	// Ensure we unregister on exit
+	registerWithDaemon(sessionID, dir, cfg, composePath)
+
+	// Ensure we unregister and cleanup on exit
 	defer func() {
 		unregisterFromDaemon(sessionID)
+
+		// Stop compose services if we started them
+		if composeStarted && composePath != "" {
+			projectName := cfg.Name
+			if projectName == "" {
+				projectName = "worklet"
+			}
+
+			if err := docker.StopComposeServices(dir, composePath, sessionID, projectName, isolation); err != nil {
+				log.Printf("Warning: Failed to stop compose services: %v", err)
+			}
+		}
+
+		// Clean up session network
+		if err := docker.RemoveSessionNetwork(sessionID); err != nil {
+			log.Printf("Warning: Failed to remove session network: %v", err)
+		}
 	}()
 
 	// Run in Docker
-	if err := docker.RunContainer(dir, cfg, sessionID, mountMode, cmdArgs...); err != nil {
+	opts := docker.RunOptions{
+		WorkDir:     dir,
+		Config:      cfg,
+		SessionID:   sessionID,
+		MountMode:   mountMode,
+		ComposePath: composePath,
+		CmdArgs:     cmdArgs,
+	}
+	if err := docker.RunContainer(opts); err != nil {
 		return fmt.Errorf("failed to run container: %w", err)
 	}
 
 	return nil
 }
 
-func generateSessionID() string {
-	// Simple ID generation based on PID
-	return fmt.Sprintf("%d", os.Getpid())
+func getSessionID() string {
+	socketPath := daemon.GetDefaultSocketPath()
+
+	// Check if daemon is running
+	if !daemon.IsDaemonRunning(socketPath) {
+		// Try to auto-start daemon
+		if err := autoStartDaemon(); err != nil {
+			log.Printf("Failed to auto-start daemon: %v", err)
+			// Fall back to timestamp-based ID
+			return fmt.Sprintf("temp-%d", time.Now().Unix())
+		}
+	}
+
+	// Connect to daemon
+	client := daemon.NewClient(socketPath)
+	if err := client.Connect(); err != nil {
+		log.Printf("Failed to connect to daemon: %v", err)
+		// Fall back to timestamp-based ID
+		return fmt.Sprintf("temp-%d", time.Now().Unix())
+	}
+	defer client.Close()
+
+	// Request fork ID
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	forkID, err := client.RequestForkID(ctx)
+	if err != nil {
+		log.Printf("Failed to request fork ID from daemon: %v", err)
+		// Fall back to timestamp-based ID
+		return fmt.Sprintf("temp-%d", time.Now().Unix())
+	}
+
+	return forkID
 }
 
-func registerWithDaemon(sessionID, workDir string, cfg *config.WorkletConfig) {
+func getComposePath(workDir string, cfg *config.WorkletConfig) string {
+	return docker.GetComposePath(workDir, cfg.Run.ComposePath)
+}
+
+func registerWithDaemon(sessionID, workDir string, cfg *config.WorkletConfig, composePath string) {
 	socketPath := daemon.GetDefaultSocketPath()
-	
+
 	// Check if daemon is running
 	if !daemon.IsDaemonRunning(socketPath) {
 		// Try to auto-start daemon
@@ -125,7 +212,7 @@ func registerWithDaemon(sessionID, workDir string, cfg *config.WorkletConfig) {
 			return
 		}
 	}
-	
+
 	// Connect to daemon
 	client := daemon.NewClient(socketPath)
 	if err := client.Connect(); err != nil {
@@ -133,8 +220,8 @@ func registerWithDaemon(sessionID, workDir string, cfg *config.WorkletConfig) {
 		return
 	}
 	defer client.Close()
-	
-	// Prepare service info
+
+	// Prepare service info from worklet config
 	var services []daemon.ServiceInfo
 	for _, svc := range cfg.Services {
 		services = append(services, daemon.ServiceInfo{
@@ -143,29 +230,45 @@ func registerWithDaemon(sessionID, workDir string, cfg *config.WorkletConfig) {
 			Subdomain: svc.Subdomain,
 		})
 	}
-	
+
+	// Add services from docker-compose if available
+	if composePath != "" {
+		composeServices, err := docker.GetComposeServicesForDaemon(composePath, sessionID, cfg.Name)
+		if err != nil {
+			log.Printf("Warning: Failed to parse compose services: %v", err)
+		} else {
+			for _, composeSvc := range composeServices {
+				services = append(services, daemon.ServiceInfo{
+					Name:      composeSvc.Name,
+					Port:      composeSvc.Port,
+					Subdomain: composeSvc.Subdomain,
+				})
+			}
+		}
+	}
+
 	// Register session (still using RegisterFork for now - will be updated when we refactor daemon)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	
+
 	// Get project name from config
 	projectName := cfg.Name
 	if projectName == "" {
 		projectName = "worklet"
 	}
-	
+
 	req := daemon.RegisterForkRequest{
 		ForkID:      sessionID,
 		ProjectName: projectName,
 		WorkDir:     workDir,
 		Services:    services,
 	}
-	
+
 	if err := client.RegisterFork(ctx, req); err != nil {
 		log.Printf("Failed to register session with daemon: %v", err)
 		return
 	}
-	
+
 	// If we have services, display the URLs
 	if len(services) > 0 {
 		// Get project name from config
@@ -173,7 +276,7 @@ func registerWithDaemon(sessionID, workDir string, cfg *config.WorkletConfig) {
 		if projectName == "" {
 			projectName = "worklet"
 		}
-		
+
 		fmt.Println("\nServices available at (via proxy on port 80):")
 		for _, svc := range services {
 			subdomain := svc.Subdomain
@@ -189,23 +292,23 @@ func registerWithDaemon(sessionID, workDir string, cfg *config.WorkletConfig) {
 
 func unregisterFromDaemon(sessionID string) {
 	socketPath := daemon.GetDefaultSocketPath()
-	
+
 	// Check if daemon is running
 	if !daemon.IsDaemonRunning(socketPath) {
 		return
 	}
-	
+
 	// Connect to daemon
 	client := daemon.NewClient(socketPath)
 	if err := client.Connect(); err != nil {
 		return
 	}
 	defer client.Close()
-	
+
 	// Unregister session (still using UnregisterFork for now - will be updated when we refactor daemon)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	
+
 	if err := client.UnregisterFork(ctx, sessionID); err != nil {
 		log.Printf("Failed to unregister session from daemon: %v", err)
 	}
@@ -217,13 +320,13 @@ func autoStartDaemon() error {
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
-	
+
 	// Start daemon
 	cmd := exec.Command(exePath, "daemon", "start")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
-	
+
 	// Wait for daemon to be ready
 	socketPath := daemon.GetDefaultSocketPath()
 	for i := 0; i < 10; i++ {
@@ -232,7 +335,7 @@ func autoStartDaemon() error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	
+
 	return fmt.Errorf("daemon failed to start")
 }
 
@@ -290,12 +393,12 @@ func startTerminalServer(port int) error {
 
 	// Start terminal server in background
 	cmd := exec.Command(exePath, "terminal", "-p", fmt.Sprintf("%d", port), "--cors-origin", "*")
-	
+
 	// Set up to run in background
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.Stdin = nil
-	
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start terminal server: %w", err)
 	}

@@ -43,6 +43,58 @@ if [ "$WORKLET_ISOLATION" = "full" ]; then
         echo "Docker daemon failed to start" >&2
         exit 1
     fi
+    
+    # Start docker-compose services if configured
+    if [ -n "$WORKLET_COMPOSE_FILE" ] && [ -f "$WORKLET_COMPOSE_FILE" ]; then
+        echo "Starting docker-compose services..."
+        
+        # Check if docker compose plugin is available
+        if ! docker compose version >/dev/null 2>&1; then
+            echo "Installing docker compose plugin..."
+            
+            # Create plugin directory
+            mkdir -p /usr/local/lib/docker/cli-plugins
+            
+            # Download compose plugin (v2.39.1 - stable version)
+            COMPOSE_VERSION="v2.39.1"
+            ARCH=$(uname -m)
+            case $ARCH in
+                x86_64) ARCH="x86_64" ;;
+                aarch64) ARCH="aarch64" ;;
+                armv7l) ARCH="armv7" ;;
+                *) echo "Unsupported architecture: $ARCH" >&2; ;;
+            esac
+            
+            if [ -n "$ARCH" ]; then
+                wget -q -O /usr/local/lib/docker/cli-plugins/docker-compose \
+                    "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${ARCH}"
+                chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+                
+                # Verify installation
+                if docker compose version >/dev/null 2>&1; then
+                    echo "Docker compose plugin installed successfully"
+                else
+                    echo "Warning: Failed to install docker compose plugin" >&2
+                fi
+            fi
+        fi
+        
+        # Generate compose project name
+        COMPOSE_PROJECT_NAME="${WORKLET_PROJECT_NAME}-${WORKLET_SESSION_ID}"
+        
+        # Start services using docker compose plugin
+        if docker compose version >/dev/null 2>&1; then
+            echo "Starting services with docker compose..."
+            docker compose -f "$WORKLET_COMPOSE_FILE" -p "$COMPOSE_PROJECT_NAME" up -d
+            if [ $? -eq 0 ]; then
+                echo "Docker-compose services started successfully"
+            else
+                echo "Warning: Failed to start docker-compose services" >&2
+            fi
+        else
+            echo "Error: Docker compose plugin not available" >&2
+        fi
+    fi
 fi
 
 # Run init script if provided

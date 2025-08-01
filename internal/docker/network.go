@@ -9,19 +9,49 @@ import (
 const WorkletNetworkName = "worklet-network"
 
 // EnsureNetworkExists creates the worklet Docker network if it doesn't exist
+// Deprecated: Use EnsureSessionNetworkExists for session-specific networks
 func EnsureNetworkExists() error {
 	// Check if network exists
 	exists, err := NetworkExists(WorkletNetworkName)
 	if err != nil {
 		return fmt.Errorf("failed to check network existence: %w", err)
 	}
-	
+
 	if exists {
 		return nil
 	}
-	
+
 	// Create the network
 	return CreateNetwork(WorkletNetworkName)
+}
+
+// EnsureSessionNetworkExists creates a session-specific Docker network if it doesn't exist
+func EnsureSessionNetworkExists(sessionID string) error {
+	networkName := fmt.Sprintf("worklet-%s", sessionID)
+
+	// Check if network exists
+	exists, err := NetworkExists(networkName)
+	if err != nil {
+		return fmt.Errorf("failed to check network existence: %w", err)
+	}
+
+	if exists {
+		return nil
+	}
+
+	// Create the network
+	return CreateNetwork(networkName)
+}
+
+// RemoveSessionNetwork removes a session-specific Docker network
+func RemoveSessionNetwork(sessionID string) error {
+	networkName := fmt.Sprintf("worklet-%s", sessionID)
+	return RemoveNetwork(networkName)
+}
+
+// GetSessionNetworkName returns the network name for a session
+func GetSessionNetworkName(sessionID string) string {
+	return fmt.Sprintf("worklet-%s", sessionID)
 }
 
 // NetworkExists checks if a Docker network exists
@@ -31,14 +61,14 @@ func NetworkExists(networkName string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to list networks: %w", err)
 	}
-	
+
 	networks := strings.Split(string(output), "\n")
 	for _, network := range networks {
 		if strings.TrimSpace(network) == networkName {
 			return true, nil
 		}
 	}
-	
+
 	return false, nil
 }
 
@@ -49,7 +79,7 @@ func CreateNetwork(networkName string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create network: %w\nOutput: %s", err, string(output))
 	}
-	
+
 	return nil
 }
 
@@ -64,7 +94,7 @@ func RemoveNetwork(networkName string) error {
 		}
 		return fmt.Errorf("failed to remove network: %w\nOutput: %s", err, string(output))
 	}
-	
+
 	return nil
 }
 
@@ -77,7 +107,7 @@ func ListNetworkContainers(networkName string) ([]string, error) {
 		// Network might not exist
 		return nil, nil
 	}
-	
+
 	containerNames := strings.Fields(string(output))
 	return containerNames, nil
 }

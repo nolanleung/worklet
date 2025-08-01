@@ -223,6 +223,79 @@ func (c *Client) sendRequest(ctx context.Context, msg *Message) (*Message, error
 	return &resp, nil
 }
 
+// RefreshFork refreshes information for a specific fork
+func (c *Client) RefreshFork(ctx context.Context, forkID string) error {
+	req := RefreshForkRequest{
+		ForkID: forkID,
+	}
+	
+	msg := Message{
+		Type:    MsgRefreshFork,
+		ID:      uuid.New().String(),
+		Payload: mustMarshal(req),
+	}
+	
+	resp, err := c.sendRequest(ctx, &msg)
+	if err != nil {
+		return err
+	}
+	
+	if resp.Type == MsgError {
+		var errResp ErrorResponse
+		json.Unmarshal(resp.Payload, &errResp)
+		return fmt.Errorf("daemon error: %s", errResp.Error)
+	}
+	
+	return nil
+}
+
+// RefreshAll refreshes information for all forks
+func (c *Client) RefreshAll(ctx context.Context) error {
+	msg := Message{
+		Type: MsgRefreshAll,
+		ID:   uuid.New().String(),
+	}
+	
+	resp, err := c.sendRequest(ctx, &msg)
+	if err != nil {
+		return err
+	}
+	
+	if resp.Type == MsgError {
+		var errResp ErrorResponse
+		json.Unmarshal(resp.Payload, &errResp)
+		return fmt.Errorf("daemon error: %s", errResp.Error)
+	}
+	
+	return nil
+}
+
+// RequestForkID requests a new fork ID from the daemon
+func (c *Client) RequestForkID(ctx context.Context) (string, error) {
+	msg := Message{
+		Type: MsgRequestForkID,
+		ID:   uuid.New().String(),
+	}
+	
+	resp, err := c.sendRequest(ctx, &msg)
+	if err != nil {
+		return "", err
+	}
+	
+	if resp.Type == MsgError {
+		var errResp ErrorResponse
+		json.Unmarshal(resp.Payload, &errResp)
+		return "", fmt.Errorf("daemon error: %s", errResp.Error)
+	}
+	
+	var idResp RequestForkIDResponse
+	if err := json.Unmarshal(resp.Payload, &idResp); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+	
+	return idResp.ForkID, nil
+}
+
 // IsDaemonRunning checks if the daemon is running
 func IsDaemonRunning(socketPath string) bool {
 	client := NewClient(socketPath)

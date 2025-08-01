@@ -11,6 +11,7 @@ body {
     display: flex;
     flex-direction: column;
     height: 100vh;
+    overflow-x: auto;
 }
 
 #header {
@@ -70,6 +71,7 @@ body {
     flex: 1;
     overflow: hidden;
     padding: 1rem;
+    width: 100%;
 }
 
 .xterm {

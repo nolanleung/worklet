@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -160,8 +162,40 @@ func (nm *NginxManager) Reload(ctx context.Context) error {
 		return fmt.Errorf("failed to create exec: %w", err)
 	}
 
+	// Attach to exec to capture output
+	attach, err := nm.client.ContainerExecAttach(ctx, exec.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to attach to exec: %w", err)
+	}
+	defer attach.Close()
+
+	// Start the exec
 	if err := nm.client.ContainerExecStart(ctx, exec.ID, container.ExecStartOptions{}); err != nil {
-		return fmt.Errorf("failed to reload nginx: %w", err)
+		return fmt.Errorf("failed to start nginx reload: %w", err)
+	}
+
+	// Read output
+	output, err := io.ReadAll(attach.Reader)
+	if err != nil {
+		return fmt.Errorf("failed to read reload output: %w", err)
+	}
+
+	// Inspect exec to check exit code
+	inspectResp, err := nm.client.ContainerExecInspect(ctx, exec.ID)
+	if err != nil {
+		return fmt.Errorf("failed to inspect exec: %w", err)
+	}
+
+	// Check if reload was successful
+	if inspectResp.ExitCode != 0 {
+		return fmt.Errorf("nginx reload failed with exit code %d: %s", inspectResp.ExitCode, string(output))
+	}
+
+	// Log successful reload
+	if len(output) > 0 {
+		log.Printf("nginx reload output: %s", string(output))
+	} else {
+		log.Printf("nginx configuration reloaded successfully")
 	}
 
 	return nil
@@ -176,6 +210,8 @@ func (nm *NginxManager) UpdateConfig(ctx context.Context, config string) error {
 		return fmt.Errorf("failed to write nginx config: %w", err)
 	}
 
+	log.Printf("Updated nginx config file: %s", configFile)
+
 	// Reload nginx if running
 	exists, running, err := nm.containerStatus(ctx)
 	if err != nil {
@@ -183,9 +219,31 @@ func (nm *NginxManager) UpdateConfig(ctx context.Context, config string) error {
 	}
 
 	if exists && running {
-		return nm.Reload(ctx)
+		// Add a small delay to allow containers to fully start
+		// This helps avoid DNS resolution issues when nginx reloads
+		time.Sleep(3 * time.Second)
+		
+		log.Printf("Reloading nginx configuration...")
+		
+		// Try to reload with retries
+		var lastErr error
+		for i := 0; i < 3; i++ {
+			if err := nm.Reload(ctx); err != nil {
+				lastErr = err
+				log.Printf("nginx reload attempt %d failed: %v", i+1, err)
+				if i < 2 {
+					time.Sleep(2 * time.Second)
+				}
+			} else {
+				// Success
+				return nil
+			}
+		}
+		
+		return fmt.Errorf("failed to reload nginx after 3 attempts: %w", lastErr)
 	}
 
+	log.Printf("nginx container not running, config updated but not reloaded")
 	return nil
 }
 

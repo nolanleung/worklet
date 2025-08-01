@@ -16,18 +16,28 @@ import (
 //go:embed dind-entrypoint.sh
 var dindEntrypointScript string
 
-func RunContainer(workDir string, cfg *config.WorkletConfig, sessionID string, mountMode bool, cmdArgs ...string) error {
+// RunOptions contains all options for running a container
+type RunOptions struct {
+	WorkDir     string
+	Config      *config.WorkletConfig
+	SessionID   string
+	MountMode   bool
+	ComposePath string // Resolved compose path
+	CmdArgs     []string
+}
+
+func RunContainer(opts RunOptions) error {
 	var imageName string
 	var err error
 
-	// Ensure Docker network exists before running container
-	if err := EnsureNetworkExists(); err != nil {
-		return fmt.Errorf("failed to ensure Docker network exists: %w", err)
+	// Ensure session-specific Docker network exists before running container
+	if err := EnsureSessionNetworkExists(opts.SessionID); err != nil {
+		return fmt.Errorf("failed to ensure session Docker network exists: %w", err)
 	}
 
 	// In copy mode, build a temporary image with the workspace files
-	if !mountMode {
-		imageName, err = buildCopyImage(workDir, cfg, sessionID)
+	if !opts.MountMode {
+		imageName, err = buildCopyImage(opts.WorkDir, opts.Config, opts.SessionID)
 		if err != nil {
 			return fmt.Errorf("failed to build copy image: %w", err)
 		}
@@ -39,7 +49,7 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, sessionID string, m
 		}()
 	} else {
 		// In mount mode, use the configured image
-		imageName = cfg.Run.Image
+		imageName = opts.Config.Run.Image
 		if imageName == "" {
 			imageName = "docker:dind"
 		}
@@ -49,24 +59,32 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, sessionID string, m
 	args := []string{"run", "--rm", "-it"}
 
 	// Add container name using project name and session ID
-	projectName := cfg.Name
+	projectName := opts.Config.Name
 	if projectName == "" {
 		projectName = "worklet"
 	}
-	containerName := fmt.Sprintf("%s-%s", projectName, sessionID)
+	containerName := fmt.Sprintf("%s-%s", projectName, opts.SessionID)
 	args = append(args, "--name", containerName)
 
-	// Add to worklet network for container-to-container communication
-	args = append(args, "--network", "worklet-network")
+	// Add to session-specific worklet network for container-to-container communication
+	networkName := GetSessionNetworkName(opts.SessionID)
+	args = append(args, "--network", networkName)
 
 	// Add worklet labels for terminal discovery
 	args = append(args, "--label", "worklet.session=true")
-	args = append(args, "--label", fmt.Sprintf("worklet.session.id=%s", sessionID))
+	args = append(args, "--label", fmt.Sprintf("worklet.session.id=%s", opts.SessionID))
 	args = append(args, "--label", fmt.Sprintf("worklet.project.name=%s", projectName))
+	args = append(args, "--label", fmt.Sprintf("worklet.workdir=%s", opts.WorkDir))
+
+	// Add service labels for discovery
+	for _, svc := range opts.Config.Services {
+		args = append(args, "--label", fmt.Sprintf("worklet.service.%s.port=%d", svc.Name, svc.Port))
+		args = append(args, "--label", fmt.Sprintf("worklet.service.%s.subdomain=%s", svc.Name, svc.Subdomain))
+	}
 
 	// In mount mode, add volume mount
-	if mountMode {
-		absWorkDir, err := filepath.Abs(workDir)
+	if opts.MountMode {
+		absWorkDir, err := filepath.Abs(opts.WorkDir)
 		if err != nil {
 			return fmt.Errorf("failed to get absolute path: %w", err)
 		}
@@ -77,7 +95,7 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, sessionID string, m
 	args = append(args, "-w", "/workspace")
 
 	// Determine isolation mode (default to "full" if not specified)
-	isolation := cfg.Run.Isolation
+	isolation := opts.Config.Run.Isolation
 	if isolation == "" {
 		isolation = "full"
 	}
@@ -110,7 +128,7 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, sessionID string, m
 		args = append(args, "-v", "/var/run/docker.sock:/var/run/docker.sock")
 
 		// Add privileged flag if specified
-		if cfg.Run.Privileged {
+		if opts.Config.Run.Privileged {
 			args = append(args, "--privileged")
 		}
 
@@ -119,20 +137,38 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, sessionID string, m
 	}
 
 	// Add environment variables
-	for key, value := range cfg.Run.Environment {
+	for key, value := range opts.Config.Run.Environment {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
+	}
+
+	// Add session ID environment variable
+	args = append(args, "-e", fmt.Sprintf("WORKLET_SESSION_ID=%s", opts.SessionID))
+	
+	// Add project name environment variable
+	args = append(args, "-e", fmt.Sprintf("WORKLET_PROJECT_NAME=%s", projectName))
+
+	// Mount compose file if configured and in full isolation mode
+	if opts.ComposePath != "" && isolation == "full" {
+		// Check if compose file exists
+		if _, err := os.Stat(opts.ComposePath); err == nil {
+			// Mount the compose file into the container
+			args = append(args, "-v", fmt.Sprintf("%s:/workspace/docker-compose.yml:ro", opts.ComposePath))
+			args = append(args, "-e", "WORKLET_COMPOSE_FILE=/workspace/docker-compose.yml")
+		} else {
+			fmt.Printf("Warning: Compose file not found: %s\n", opts.ComposePath)
+		}
 	}
 
 	// Build init script
 	var initScripts []string
 
 	// Add user-provided init script
-	if len(cfg.Run.InitScript) > 0 {
-		initScripts = append(initScripts, cfg.Run.InitScript...)
+	if len(opts.Config.Run.InitScript) > 0 {
+		initScripts = append(initScripts, opts.Config.Run.InitScript...)
 	}
 
 	// Add credential init script if needed
-	if cfg.Run.Credentials != nil && cfg.Run.Credentials.Claude {
+	if opts.Config.Run.Credentials != nil && opts.Config.Run.Credentials.Claude {
 		if credInitScript := GetCredentialInitScript(true); credInitScript != "" {
 			// Prepend credential setup to ensure it runs first
 			initScripts = append([]string{credInitScript}, initScripts...)
@@ -146,12 +182,12 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, sessionID string, m
 	}
 
 	// Add additional volumes
-	for _, volume := range cfg.Run.Volumes {
+	for _, volume := range opts.Config.Run.Volumes {
 		args = append(args, "-v", volume)
 	}
 
 	// Add credential volumes if configured
-	if cfg.Run.Credentials != nil && cfg.Run.Credentials.Claude {
+	if opts.Config.Run.Credentials != nil && opts.Config.Run.Credentials.Claude {
 		credentialMounts := GetCredentialVolumeMounts(true)
 		args = append(args, credentialMounts...)
 	}
@@ -160,12 +196,12 @@ func RunContainer(workDir string, cfg *config.WorkletConfig, sessionID string, m
 	args = append(args, imageName)
 
 	// Add command
-	if len(cmdArgs) > 0 {
+	if len(opts.CmdArgs) > 0 {
 		// Use provided command arguments
-		args = append(args, cmdArgs...)
-	} else if len(cfg.Run.Command) > 0 {
+		args = append(args, opts.CmdArgs...)
+	} else if len(opts.Config.Run.Command) > 0 {
 		// Fall back to config command
-		args = append(args, cfg.Run.Command...)
+		args = append(args, opts.Config.Run.Command...)
 	} else {
 		// Default to shell
 		args = append(args, "sh")

@@ -46,6 +46,13 @@ var daemonLogsCmd = &cobra.Command{
 	RunE:  runDaemonLogs,
 }
 
+var daemonRestartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Restart the worklet daemon",
+	Long:  `Stop the worklet daemon if running, then start it again. This is useful for applying configuration changes or recovering from issues.`,
+	RunE:  runDaemonRestart,
+}
+
 var (
 	daemonForeground bool
 )
@@ -55,6 +62,7 @@ func init() {
 
 	daemonCmd.AddCommand(daemonStartCmd)
 	daemonCmd.AddCommand(daemonStopCmd)
+	daemonCmd.AddCommand(daemonRestartCmd)
 	daemonCmd.AddCommand(daemonStatusCmd)
 	daemonCmd.AddCommand(daemonLogsCmd)
 }
@@ -263,4 +271,23 @@ func runDaemonLogs(cmd *cobra.Command, args []string) error {
 	tailCmd.Stderr = os.Stderr
 
 	return tailCmd.Run()
+}
+
+func runDaemonRestart(cmd *cobra.Command, args []string) error {
+	socketPath := daemon.GetDefaultSocketPath()
+	
+	// Stop daemon if running
+	if daemon.IsDaemonRunning(socketPath) {
+		fmt.Println("Stopping existing daemon...")
+		if err := runDaemonStop(cmd, args); err != nil {
+			return fmt.Errorf("failed to stop daemon: %w", err)
+		}
+		
+		// Wait a moment for cleanup
+		time.Sleep(1 * time.Second)
+	}
+	
+	// Start daemon
+	fmt.Println("Starting daemon...")
+	return runDaemonStart(cmd, args)
 }

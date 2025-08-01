@@ -26,4 +26,6 @@ func init() {
 	rootCmd.AddCommand(linkCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(terminalCmd)
+	rootCmd.AddCommand(refreshCmd)
+	rootCmd.AddCommand(forksCmd)
 }

@@ -16,12 +16,16 @@ const (
 	MsgGetForkInfo    MessageType = "GET_FORK_INFO"
 	MsgProxyRegister  MessageType = "PROXY_REGISTER"
 	MsgHealthCheck    MessageType = "HEALTH_CHECK"
+	MsgRefreshFork    MessageType = "REFRESH_FORK"
+	MsgRefreshAll     MessageType = "REFRESH_ALL"
+	MsgRequestForkID  MessageType = "REQUEST_FORK_ID"
 	
 	// Daemon -> Client responses
 	MsgSuccess        MessageType = "SUCCESS"
 	MsgError          MessageType = "ERROR"
 	MsgForkList       MessageType = "FORK_LIST"
 	MsgForkInfo       MessageType = "FORK_INFO"
+	MsgForkID         MessageType = "FORK_ID"
 )
 
 // Message represents a message between client and daemon
@@ -84,4 +88,19 @@ type ErrorResponse struct {
 // SuccessResponse is sent for successful operations
 type SuccessResponse struct {
 	Message string `json:"message,omitempty"`
+}
+
+// RefreshForkRequest is sent to refresh a specific fork's information
+type RefreshForkRequest struct {
+	ForkID string `json:"fork_id"`
+}
+
+// RefreshAllRequest is sent to refresh all forks
+type RefreshAllRequest struct {
+	// No fields needed for refresh all
+}
+
+// RequestForkIDResponse contains the next available fork ID
+type RequestForkIDResponse struct {
+	ForkID string `json:"fork_id"`
 }

@@ -6,6 +6,8 @@ let currentFork = null;
 // Initialize terminal
 function initTerminal() {
     terminal = new Terminal({
+        rows: 40,
+        cols: 140,
         cursorBlink: true,
         fontSize: 14,
         fontFamily: 'Menlo, Monaco, "Courier New", monospace',
@@ -41,19 +43,10 @@ function initTerminal() {
     const container = document.getElementById('terminal-container');
     container.innerHTML = '';
     terminal.open(container);
-    fitAddon.fit();
+    // Do not use fitAddon to fit terminal - keep fixed size
+    // fitAddon.fit();
 
-    // Handle window resize
-    window.addEventListener('resize', () => {
-        fitAddon.fit();
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({
-                type: 'resize',
-                rows: terminal.rows,
-                cols: terminal.cols
-            }));
-        }
-    });
+    // Window resize events are ignored - terminal is fixed at 140x40
 }
 
 // Load available forks
@@ -101,11 +94,11 @@ function connectToFork() {
         terminal.writeln('');
         
         // Send initial resize
-        // socket.send(JSON.stringify({
-        //     type: 'resize',
-        //     rows: terminal.rows,
-        //     cols: terminal.cols
-        // }));
+        socket.send(JSON.stringify({
+            type: 'resize',
+            rows: 40,
+            cols: 140
+        }));
     };
     
     socket.onmessage = async (event) => {

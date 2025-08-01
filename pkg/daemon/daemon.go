@@ -9,11 +9,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/nolanleung/worklet/internal/docker"
 	"github.com/nolanleung/worklet/internal/nginx"
@@ -25,6 +27,7 @@ type Daemon struct {
 	listener     net.Listener
 	forks        map[string]*ForkInfo
 	forksMu      sync.RWMutex
+	nextForkID   int
 	ctx          context.Context
 	cancel       context.CancelFunc
 	stateFile    string
@@ -49,6 +52,7 @@ func NewDaemon(socketPath string) *Daemon {
 	return &Daemon{
 		socketPath:   socketPath,
 		forks:        make(map[string]*ForkInfo),
+		nextForkID:   1,
 		ctx:          ctx,
 		cancel:       cancel,
 		stateFile:    stateFile,
@@ -81,14 +85,14 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 	
-	// Load state
+	// Load state (only nextForkID now)
 	if err := d.loadState(); err != nil {
 		log.Printf("Failed to load state: %v", err)
 	}
 	
-	// Validate and cleanup stale forks
-	if err := d.validateAndCleanupForks(); err != nil {
-		log.Printf("Failed to validate forks: %v", err)
+	// Discover any running worklet containers
+	if err := d.discoverContainers(); err != nil {
+		log.Printf("Failed to discover containers: %v", err)
 	}
 	
 	// Start accepting connections
@@ -193,6 +197,12 @@ func (d *Daemon) handleMessage(msg *Message) *Message {
 		return d.handleListForks(msg)
 	case MsgGetForkInfo:
 		return d.handleGetForkInfo(msg)
+	case MsgRefreshFork:
+		return d.handleRefreshFork(msg)
+	case MsgRefreshAll:
+		return d.handleRefreshAll(msg)
+	case MsgRequestForkID:
+		return d.handleRequestForkID(msg)
 	case MsgHealthCheck:
 		return &Message{
 			Type: MsgSuccess,
@@ -228,9 +238,6 @@ func (d *Daemon) handleRegisterFork(msg *Message) *Message {
 	}
 	d.forksMu.Unlock()
 	
-	// Save state after registration
-	go d.saveState()
-	
 	// Update nginx configuration
 	d.updateNginxConfig()
 	
@@ -252,9 +259,6 @@ func (d *Daemon) handleUnregisterFork(msg *Message) *Message {
 	d.forksMu.Lock()
 	delete(d.forks, req.ForkID)
 	d.forksMu.Unlock()
-	
-	// Save state after unregistration
-	go d.saveState()
 	
 	// Update nginx configuration
 	d.updateNginxConfig()
@@ -303,6 +307,76 @@ func (d *Daemon) handleGetForkInfo(msg *Message) *Message {
 		Type: MsgForkInfo,
 		ID:   msg.ID,
 		Payload: mustMarshal(fork),
+	}
+}
+
+func (d *Daemon) handleRefreshFork(msg *Message) *Message {
+	var req RefreshForkRequest
+	if err := json.Unmarshal(msg.Payload, &req); err != nil {
+		return errorResponse(msg.ID, "invalid request payload")
+	}
+	
+	// Refresh the specific fork
+	refreshed, err := d.refreshFork(req.ForkID)
+	if err != nil {
+		return errorResponse(msg.ID, err.Error())
+	}
+	
+	if refreshed {
+		// Update nginx configuration if fork was refreshed
+		d.updateNginxConfig()
+	}
+	
+	return &Message{
+		Type: MsgSuccess,
+		ID:   msg.ID,
+		Payload: mustMarshal(SuccessResponse{
+			Message: fmt.Sprintf("Fork %s refreshed", req.ForkID),
+		}),
+	}
+}
+
+func (d *Daemon) handleRefreshAll(msg *Message) *Message {
+	// First discover any running containers not in our state
+	if err := d.discoverContainers(); err != nil {
+		log.Printf("Failed to discover containers during refresh: %v", err)
+	}
+	
+	// Then refresh all forks
+	count, err := d.refreshAllForks()
+	if err != nil {
+		return errorResponse(msg.ID, err.Error())
+	}
+	
+	if count > 0 {
+		// Update nginx configuration if any forks were refreshed
+		d.updateNginxConfig()
+	}
+	
+	return &Message{
+		Type: MsgSuccess,
+		ID:   msg.ID,
+		Payload: mustMarshal(SuccessResponse{
+			Message: fmt.Sprintf("Refreshed %d fork(s)", count),
+		}),
+	}
+}
+
+func (d *Daemon) handleRequestForkID(msg *Message) *Message {
+	d.forksMu.Lock()
+	forkID := fmt.Sprintf("%d", d.nextForkID)
+	d.nextForkID++
+	d.forksMu.Unlock()
+	
+	// Save state with updated counter
+	go d.saveState()
+	
+	return &Message{
+		Type: MsgForkID,
+		ID:   msg.ID,
+		Payload: mustMarshal(RequestForkIDResponse{
+			ForkID: forkID,
+		}),
 	}
 }
 
@@ -379,9 +453,6 @@ func (d *Daemon) validateAndCleanupForks() error {
 	}
 
 	if len(forksToRemove) > 0 {
-		// Save updated state
-		go d.saveState()
-		
 		// Update nginx configuration
 		d.updateNginxConfig()
 		
@@ -391,12 +462,164 @@ func (d *Daemon) validateAndCleanupForks() error {
 	return nil
 }
 
+// discoverContainers finds running worklet containers by labels and registers them
+func (d *Daemon) discoverContainers() error {
+	// Create Docker client
+	cli, err := client.NewClientWithOpts(client.FromEnv)
+	if err != nil {
+		return fmt.Errorf("failed to create Docker client: %w", err)
+	}
+	defer cli.Close()
+	
+	// List containers with worklet.session=true label
+	filters := filters.NewArgs()
+	filters.Add("label", "worklet.session=true")
+	
+	containers, err := cli.ContainerList(context.Background(), container.ListOptions{
+		All:     true,
+		Filters: filters,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list containers: %w", err)
+	}
+	
+	d.forksMu.Lock()
+	
+	discoveredCount := 0
+	for _, container := range containers {
+		// Skip if container is not running
+		if container.State != "running" {
+			continue
+		}
+		
+		// Extract fork information from labels
+		forkID := container.Labels["worklet.session.id"]
+		projectName := container.Labels["worklet.project.name"]
+		workDir := container.Labels["worklet.workdir"]
+		
+		if forkID == "" {
+			continue
+		}
+		
+		// Check if fork is already registered
+		if _, exists := d.forks[forkID]; exists {
+			continue
+		}
+		
+		// Load services from .worklet.jsonc if workdir is available
+		var services []ServiceInfo
+		
+		if workDir != "" {
+			// Try to load config from workdir
+			configPath := filepath.Join(workDir, ".worklet.jsonc")
+			if configData, err := os.ReadFile(configPath); err == nil {
+				// Parse the config to get services
+				var cfg struct {
+					Services []struct {
+						Name      string `json:"name"`
+						Port      int    `json:"port"`
+						Subdomain string `json:"subdomain"`
+					} `json:"services"`
+				}
+				
+				if err := json.Unmarshal(configData, &cfg); err == nil {
+					// Use services from config file
+					for _, svc := range cfg.Services {
+						services = append(services, ServiceInfo{
+							Name:      svc.Name,
+							Port:      svc.Port,
+							Subdomain: svc.Subdomain,
+						})
+					}
+				} else {
+					log.Printf("Failed to parse config for fork %s: %v", forkID, err)
+				}
+			} else {
+				log.Printf("Failed to read config for fork %s: %v", forkID, err)
+			}
+		}
+		
+		// If we couldn't load from config, fall back to labels (for backward compatibility)
+		if len(services) == 0 {
+			serviceMap := make(map[string]*ServiceInfo)
+			
+			for label, value := range container.Labels {
+				if strings.HasPrefix(label, "worklet.service.") {
+					parts := strings.Split(label, ".")
+					if len(parts) == 4 {
+						serviceName := parts[2]
+						field := parts[3]
+						
+						if _, ok := serviceMap[serviceName]; !ok {
+							serviceMap[serviceName] = &ServiceInfo{Name: serviceName}
+						}
+						
+						switch field {
+						case "port":
+							if port, err := strconv.Atoi(value); err == nil {
+								serviceMap[serviceName].Port = port
+							}
+						case "subdomain":
+							serviceMap[serviceName].Subdomain = value
+						}
+					}
+				}
+			}
+			
+			// Convert service map to slice
+			for _, svc := range serviceMap {
+				services = append(services, *svc)
+			}
+		}
+		
+		// Ensure forks map is initialized (defensive check)
+		if d.forks == nil {
+			d.forks = make(map[string]*ForkInfo)
+		}
+		
+		// Register the discovered fork
+		d.forks[forkID] = &ForkInfo{
+			ForkID:       forkID,
+			ProjectName:  projectName,
+			ContainerID:  container.ID,
+			Services:     services,
+			RegisteredAt: time.Now(),
+			LastSeenAt:   time.Now(),
+		}
+		
+		discoveredCount++
+		log.Printf("Discovered and registered fork %s from container %s", forkID, container.Names[0])
+	}
+	
+	// Release the lock before calling other methods
+	d.forksMu.Unlock()
+	
+	if discoveredCount > 0 {
+		// Update nginx configuration (now safe to call)
+		d.updateNginxConfig()
+		
+		log.Printf("Discovered and registered %d fork(s)", discoveredCount)
+	}
+	
+	return nil
+}
+
+// DaemonState represents the persistent state of the daemon
+type DaemonState struct {
+	NextForkID int `json:"next_fork_id"`
+}
+
 // State persistence methods
 func (d *Daemon) saveState() error {
 	d.forksMu.RLock()
-	defer d.forksMu.RUnlock()
+	nextForkID := d.nextForkID
+	d.forksMu.RUnlock()
 	
-	data, err := json.MarshalIndent(d.forks, "", "  ")
+	state := DaemonState{
+		NextForkID: nextForkID,
+	}
+	
+	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -422,7 +645,107 @@ func (d *Daemon) loadState() error {
 	d.forksMu.Lock()
 	defer d.forksMu.Unlock()
 	
-	return json.Unmarshal(data, &d.forks)
+	var state DaemonState
+	if err := json.Unmarshal(data, &state); err != nil {
+		// Try to handle old format gracefully
+		var oldState struct {
+			Forks      map[string]*ForkInfo `json:"forks"`
+			NextForkID int                  `json:"next_fork_id"`
+		}
+		if err := json.Unmarshal(data, &oldState); err != nil {
+			return err
+		}
+		// Only use nextForkID from old state
+		d.nextForkID = oldState.NextForkID
+	} else {
+		d.nextForkID = state.NextForkID
+	}
+	
+	if d.nextForkID < 1 {
+		d.nextForkID = 1
+	}
+	
+	return nil
+}
+
+// refreshFork refreshes information for a specific fork
+func (d *Daemon) refreshFork(forkID string) (bool, error) {
+	d.forksMu.Lock()
+	defer d.forksMu.Unlock()
+	
+	fork, exists := d.forks[forkID]
+	if !exists {
+		return false, fmt.Errorf("fork %s not found", forkID)
+	}
+	
+	// Create Docker client
+	cli, err := client.NewClientWithOpts(client.FromEnv)
+	if err != nil {
+		return false, fmt.Errorf("failed to create Docker client: %w", err)
+	}
+	defer cli.Close()
+	
+	// Construct container name
+	containerName := fork.ProjectName + "-" + forkID
+	if fork.ProjectName == "" {
+		containerName = "worklet-" + forkID
+	}
+	
+	// Inspect container to get current information
+	containerInfo, err := cli.ContainerInspect(context.Background(), containerName)
+	if err != nil {
+		// Container might not exist anymore
+		delete(d.forks, forkID)
+		return true, nil
+	}
+	
+	// Update last seen time
+	fork.LastSeenAt = time.Now()
+	
+	// Update container ID if changed
+	fork.ContainerID = containerInfo.ID
+	
+	// Note: We do NOT auto-discover services from container ports
+	// Services should only come from .worklet.jsonc via RegisterFork or discoverContainers
+	// This prevents Docker daemon ports (2375/2376) from being exposed through nginx
+	
+	// Save updated fork info
+	d.forks[forkID] = fork
+	
+	return true, nil
+}
+
+// refreshAllForks refreshes information for all registered forks
+func (d *Daemon) refreshAllForks() (int, error) {
+	// Get list of fork IDs to refresh
+	d.forksMu.RLock()
+	forkIDs := make([]string, 0, len(d.forks))
+	for forkID := range d.forks {
+		forkIDs = append(forkIDs, forkID)
+	}
+	d.forksMu.RUnlock()
+	
+	refreshedCount := 0
+	var lastErr error
+	
+	// Refresh each fork
+	for _, forkID := range forkIDs {
+		refreshed, err := d.refreshFork(forkID)
+		if err != nil {
+			log.Printf("Failed to refresh fork %s: %v", forkID, err)
+			lastErr = err
+			continue
+		}
+		if refreshed {
+			refreshedCount++
+		}
+	}
+	
+	if lastErr != nil && refreshedCount == 0 {
+		return refreshedCount, lastErr
+	}
+	
+	return refreshedCount, nil
 }
 
 // updateNginxConfig updates the nginx configuration with all registered forks
