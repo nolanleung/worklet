@@ -238,8 +238,16 @@ func (d *Daemon) handleRegisterFork(msg *Message) *Message {
 	}
 	d.forksMu.Unlock()
 	
-	// Update nginx configuration
+	// Update nginx configuration and ensure it's connected to the fork's network
 	d.updateNginxConfig()
+	
+	// Connect nginx to the session's network
+	if d.nginxManager != nil {
+		networkName := fmt.Sprintf("worklet-%s", req.ForkID)
+		if err := d.nginxManager.ConnectToNetwork(context.Background(), networkName); err != nil {
+			log.Printf("Warning: failed to connect nginx to network %s: %v", networkName, err)
+		}
+	}
 	
 	return &Message{
 		Type: MsgSuccess,
@@ -582,6 +590,7 @@ func (d *Daemon) discoverContainers() error {
 			ForkID:       forkID,
 			ProjectName:  projectName,
 			ContainerID:  container.ID,
+			WorkDir:      workDir,
 			Services:     services,
 			RegisteredAt: time.Now(),
 			LastSeenAt:   time.Now(),
@@ -597,6 +606,13 @@ func (d *Daemon) discoverContainers() error {
 	if discoveredCount > 0 {
 		// Update nginx configuration (now safe to call)
 		d.updateNginxConfig()
+		
+		// Ensure nginx is connected to all discovered session networks
+		if d.nginxManager != nil {
+			if err := d.nginxManager.EnsureConnectedToAllNetworks(context.Background()); err != nil {
+				log.Printf("Warning: failed to connect nginx to all networks: %v", err)
+			}
+		}
 		
 		log.Printf("Discovered and registered %d fork(s)", discoveredCount)
 	}

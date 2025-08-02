@@ -1,0 +1,17 @@
+{
+  "name": "hello-world",
+  "run": {
+    "image": "golang:1.21",
+    "command": ["go", "run", "main.go"],
+    "environment": {
+      "GO111MODULE": "on"
+    }
+  },
+  "services": [
+    {
+      "name": "web",
+      "port": 8080,
+      "subdomain": "hello"
+    }
+  ]
+}

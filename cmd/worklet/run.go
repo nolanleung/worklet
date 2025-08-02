@@ -7,11 +7,14 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/nolanleung/worklet/internal/config"
 	"github.com/nolanleung/worklet/internal/docker"
+	"github.com/nolanleung/worklet/internal/projects"
 	"github.com/nolanleung/worklet/pkg/daemon"
 	"github.com/nolanleung/worklet/pkg/terminal"
 	"github.com/spf13/cobra"
@@ -75,10 +78,61 @@ func init() {
 
 // RunInDirectory runs worklet in the specified directory
 func RunInDirectory(dir string, cmdArgs ...string) error {
+	return runInDirectoryWithMode(dir, false, cmdArgs...)
+}
+
+// RunInBackground runs worklet in the specified directory in detached mode
+func RunInBackground(dir string, cmdArgs ...string) error {
+	return runInDirectoryWithMode(dir, true, cmdArgs...)
+}
+
+// AttachToContainer attaches to an existing container for a session
+func AttachToContainer(sessionID string) error {
+	// Try to find the container by session ID label
+	checkCmd := exec.Command("docker", "ps", "-q", "-f", fmt.Sprintf("label=worklet.session.id=%s", sessionID))
+	output, err := checkCmd.Output()
+	if err != nil || len(output) == 0 {
+		return fmt.Errorf("no running container found for session %s", sessionID)
+	}
+	
+	containerID := strings.TrimSpace(string(output))
+	
+	// Get container name for display
+	nameCmd := exec.Command("docker", "inspect", "-f", "{{.Name}}", containerID)
+	nameOutput, _ := nameCmd.Output()
+	containerName := strings.TrimPrefix(strings.TrimSpace(string(nameOutput)), "/")
+	
+	// Try to attach using docker attach command
+	cmd := exec.Command("docker", "attach", containerID)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
+	fmt.Printf("Attaching to container %s...\n", containerName)
+	fmt.Println("Tip: Use Ctrl+P, Ctrl+Q to detach without stopping the container")
+	
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to attach to container: %w", err)
+	}
+	
+	return nil
+}
+
+// runInDirectoryWithMode runs worklet with specified attach mode
+func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error {
 	// Load config
 	cfg, err := config.LoadConfig(dir)
 	if err != nil {
 		return fmt.Errorf("failed to load .worklet.jsonc: %w", err)
+	}
+
+	// Track project in history
+	if manager, err := projects.NewManager(); err == nil {
+		projectName := cfg.Name
+		if projectName == "" {
+			projectName = filepath.Base(dir)
+		}
+		manager.AddOrUpdate(dir, projectName)
 	}
 
 	// Get session ID from daemon or generate fallback
@@ -123,27 +177,30 @@ func RunInDirectory(dir string, cmdArgs ...string) error {
 	// Register with daemon if it's running
 	registerWithDaemon(sessionID, dir, cfg, composePath)
 
-	// Ensure we unregister and cleanup on exit
-	defer func() {
-		unregisterFromDaemon(sessionID)
+	// For detached mode, we don't want to cleanup on exit
+	if !detached {
+		// Ensure we unregister and cleanup on exit
+		defer func() {
+			unregisterFromDaemon(sessionID)
 
-		// Stop compose services if we started them
-		if composeStarted && composePath != "" {
-			projectName := cfg.Name
-			if projectName == "" {
-				projectName = "worklet"
+			// Stop compose services if we started them
+			if composeStarted && composePath != "" {
+				projectName := cfg.Name
+				if projectName == "" {
+					projectName = "worklet"
+				}
+
+				if err := docker.StopComposeServices(dir, composePath, sessionID, projectName, isolation); err != nil {
+					log.Printf("Warning: Failed to stop compose services: %v", err)
+				}
 			}
 
-			if err := docker.StopComposeServices(dir, composePath, sessionID, projectName, isolation); err != nil {
-				log.Printf("Warning: Failed to stop compose services: %v", err)
+			// Clean up session network
+			if err := docker.RemoveSessionNetwork(sessionID); err != nil {
+				log.Printf("Warning: Failed to remove session network: %v", err)
 			}
-		}
-
-		// Clean up session network
-		if err := docker.RemoveSessionNetwork(sessionID); err != nil {
-			log.Printf("Warning: Failed to remove session network: %v", err)
-		}
-	}()
+		}()
+	}
 
 	// Run in Docker
 	opts := docker.RunOptions{
@@ -153,7 +210,28 @@ func RunInDirectory(dir string, cmdArgs ...string) error {
 		MountMode:   mountMode,
 		ComposePath: composePath,
 		CmdArgs:     cmdArgs,
+		Detached:    detached,
 	}
+	
+	if detached {
+		containerID, err := docker.RunContainerDetached(opts)
+		if err != nil {
+			return fmt.Errorf("failed to run container: %w", err)
+		}
+		
+		// Update project manager with container ID
+		if manager, err := projects.NewManager(); err == nil {
+			manager.UpdateForkStatus(dir, sessionID, true)
+		}
+		
+		fmt.Printf("Container started in background with ID: %s\n", containerID[:12])
+		fmt.Printf("Session ID: %s\n", sessionID)
+		if shouldStartTerminal {
+			fmt.Printf("Access terminal at: http://localhost:%d\n", runTerminalPort)
+		}
+		return nil
+	}
+	
 	if err := docker.RunContainer(opts); err != nil {
 		return fmt.Errorf("failed to run container: %w", err)
 	}

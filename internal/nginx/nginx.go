@@ -30,6 +30,10 @@ events {
 }
 
 http {
+    # Docker DNS resolver - use Docker's embedded DNS server
+    resolver 127.0.0.11 valid=30s ipv6=off;
+    resolver_timeout 5s;
+
     # Basic settings
     sendfile on;
     tcp_nopush on;
@@ -67,7 +71,9 @@ http {
         server_name {{if .Subdomain}}{{.Subdomain}}.{{.ProjectName}}-{{.ForkID}}{{else}}{{.ProjectName}}-{{.ForkID}}{{end}}.{{$.WorkletDomain}};
 
         location / {
-            proxy_pass http://{{.ProjectName}}-{{.ForkID}}:{{.Port}};
+            # Use variable to force runtime DNS resolution
+            set $upstream {{.ProjectName}}-{{.ForkID}}:{{.Port}};
+            proxy_pass http://$upstream;
             proxy_http_version 1.1;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection $connection_upgrade;

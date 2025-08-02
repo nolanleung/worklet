@@ -24,6 +24,7 @@ type RunOptions struct {
 	MountMode   bool
 	ComposePath string // Resolved compose path
 	CmdArgs     []string
+	Detached    bool   // Run container in detached mode
 }
 
 func RunContainer(opts RunOptions) error {
@@ -56,7 +57,11 @@ func RunContainer(opts RunOptions) error {
 	}
 
 	// Build docker run command
-	args := []string{"run", "--rm", "-it"}
+	// Don't use --rm to allow detach/reattach workflow
+	args := []string{"run", "-it"}
+	
+	// Add detach keys for interactive mode to allow Ctrl+P, Ctrl+Q
+	args = append(args, "--detach-keys", "ctrl-p,ctrl-q")
 
 	// Add container name using project name and session ID
 	projectName := opts.Config.Name
@@ -223,6 +228,189 @@ func RunContainer(opts RunOptions) error {
 	}
 
 	return nil
+}
+
+// RunContainerDetached runs a container in detached mode and returns the container ID
+func RunContainerDetached(opts RunOptions) (string, error) {
+	var imageName string
+	var err error
+
+	// Ensure session-specific Docker network exists before running container
+	if err := EnsureSessionNetworkExists(opts.SessionID); err != nil {
+		return "", fmt.Errorf("failed to ensure session Docker network exists: %w", err)
+	}
+
+	// In copy mode, build a temporary image with the workspace files
+	if !opts.MountMode {
+		imageName, err = buildCopyImage(opts.WorkDir, opts.Config, opts.SessionID)
+		if err != nil {
+			return "", fmt.Errorf("failed to build copy image: %w", err)
+		}
+		// Note: We don't clean up the image here since container will be running
+	} else {
+		// In mount mode, use the configured image
+		imageName = opts.Config.Run.Image
+		if imageName == "" {
+			imageName = "docker:dind"
+		}
+	}
+
+	// Build docker run command
+	// Note: Don't use --rm for detached containers as we want them to persist
+	args := []string{"run", "-d"} // Use -d for detached mode
+
+	// Add container name using project name and session ID
+	projectName := opts.Config.Name
+	if projectName == "" {
+		projectName = "worklet"
+	}
+	containerName := fmt.Sprintf("%s-%s", projectName, opts.SessionID)
+	args = append(args, "--name", containerName)
+
+	// Add to session-specific worklet network for container-to-container communication
+	networkName := GetSessionNetworkName(opts.SessionID)
+	args = append(args, "--network", networkName)
+
+	// Add worklet labels for terminal discovery
+	args = append(args, "--label", "worklet.session=true")
+	args = append(args, "--label", fmt.Sprintf("worklet.session.id=%s", opts.SessionID))
+	args = append(args, "--label", fmt.Sprintf("worklet.project.name=%s", projectName))
+	args = append(args, "--label", fmt.Sprintf("worklet.workdir=%s", opts.WorkDir))
+
+	// Add service labels for discovery
+	for _, svc := range opts.Config.Services {
+		args = append(args, "--label", fmt.Sprintf("worklet.service.%s.port=%d", svc.Name, svc.Port))
+		args = append(args, "--label", fmt.Sprintf("worklet.service.%s.subdomain=%s", svc.Name, svc.Subdomain))
+	}
+
+	// In mount mode, add volume mount
+	if opts.MountMode {
+		absWorkDir, err := filepath.Abs(opts.WorkDir)
+		if err != nil {
+			return "", fmt.Errorf("failed to get absolute path: %w", err)
+		}
+		args = append(args, "-v", fmt.Sprintf("%s:/workspace", absWorkDir))
+	}
+
+	// Always set working directory
+	args = append(args, "-w", "/workspace")
+
+	// Determine isolation mode (default to "full" if not specified)
+	isolation := opts.Config.Run.Isolation
+	if isolation == "" {
+		isolation = "full"
+	}
+
+	// Configure based on isolation mode
+	switch isolation {
+	case "full":
+		// Full isolation with Docker-in-Docker
+		args = append(args, "--privileged")
+		args = append(args, "-e", "WORKLET_ISOLATION=full")
+
+		// Mount the entrypoint script
+		scriptPath, err := getEntrypointScriptPath()
+		if err != nil {
+			return "", fmt.Errorf("failed to get entrypoint script path: %w", err)
+		}
+		// Note: We don't remove the script immediately since container needs it
+		// TODO: Clean up script files periodically
+		
+		args = append(args, "-v", fmt.Sprintf("%s:/entrypoint.sh:ro", scriptPath))
+		args = append(args, "--entrypoint", "/entrypoint.sh")
+
+	case "shared":
+		// Shared Docker daemon via socket mount
+		args = append(args, "-v", "/var/run/docker.sock:/var/run/docker.sock")
+
+		// Add privileged flag if specified
+		if opts.Config.Run.Privileged {
+			args = append(args, "--privileged")
+		}
+
+	default:
+		return "", fmt.Errorf("invalid isolation mode: %s (must be 'full' or 'shared')", isolation)
+	}
+
+	// Add environment variables
+	for key, value := range opts.Config.Run.Environment {
+		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
+	}
+
+	// Add session ID environment variable
+	args = append(args, "-e", fmt.Sprintf("WORKLET_SESSION_ID=%s", opts.SessionID))
+	
+	// Add project name environment variable
+	args = append(args, "-e", fmt.Sprintf("WORKLET_PROJECT_NAME=%s", projectName))
+
+	// Mount compose file if configured and in full isolation mode
+	if opts.ComposePath != "" && isolation == "full" {
+		if _, err := os.Stat(opts.ComposePath); err == nil {
+			args = append(args, "-v", fmt.Sprintf("%s:/workspace/docker-compose.yml:ro", opts.ComposePath))
+			args = append(args, "-e", "WORKLET_COMPOSE_FILE=/workspace/docker-compose.yml")
+		}
+	}
+
+	// Build init script
+	var initScripts []string
+
+	// Add user-provided init script
+	if len(opts.Config.Run.InitScript) > 0 {
+		initScripts = append(initScripts, opts.Config.Run.InitScript...)
+	}
+
+	// Add credential init script if needed
+	if opts.Config.Run.Credentials != nil && opts.Config.Run.Credentials.Claude {
+		if credInitScript := GetCredentialInitScript(true); credInitScript != "" {
+			initScripts = append([]string{credInitScript}, initScripts...)
+		}
+	}
+
+	// Set combined init script if we have any
+	if len(initScripts) > 0 {
+		initScript := strings.Join(initScripts, " && ")
+		args = append(args, "-e", fmt.Sprintf("WORKLET_INIT_SCRIPT=%s", initScript))
+	}
+
+	// Add additional volumes
+	for _, volume := range opts.Config.Run.Volumes {
+		args = append(args, "-v", volume)
+	}
+
+	// Add credential volumes if configured
+	if opts.Config.Run.Credentials != nil && opts.Config.Run.Credentials.Claude {
+		credentialMounts := GetCredentialVolumeMounts(true)
+		args = append(args, credentialMounts...)
+	}
+
+	// Add image
+	args = append(args, imageName)
+
+	// For detached mode, use a long-running command if no command specified
+	if len(opts.CmdArgs) > 0 {
+		args = append(args, opts.CmdArgs...)
+	} else if len(opts.Config.Run.Command) > 0 {
+		args = append(args, opts.Config.Run.Command...)
+	} else {
+		// Use tail -f /dev/null to keep container running
+		args = append(args, "tail", "-f", "/dev/null")
+	}
+
+	// Execute docker command
+	cmd := exec.Command("docker", args...)
+	
+	fmt.Printf("Starting container in background...\n")
+
+	// Run the container and capture output
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("docker command failed: %w\nOutput: %s", err, output)
+	}
+
+	// Extract container ID from output
+	containerID := strings.TrimSpace(string(output))
+	
+	return containerID, nil
 }
 
 // getEntrypointScriptPath extracts the embedded entrypoint script to a temp file

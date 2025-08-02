@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 )
@@ -78,7 +79,8 @@ func (nm *NginxManager) Start(ctx context.Context) error {
 	}
 
 	hostConfig := &container.HostConfig{
-		NetworkMode: container.NetworkMode(WorkletNetworkName),
+		// Use default bridge network mode to allow port binding
+		// The container will be connected to WorkletNetworkName after creation
 		PortBindings: nat.PortMap{
 			"80/tcp": []nat.PortBinding{
 				{HostIP: "0.0.0.0", HostPort: "80"},
@@ -103,6 +105,21 @@ func (nm *NginxManager) Start(ctx context.Context) error {
 
 	if err := nm.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
 		return fmt.Errorf("failed to start nginx container: %w", err)
+	}
+
+	// Ensure the main worklet network exists and connect to it
+	if err := EnsureNetworkExists(); err != nil {
+		log.Printf("Warning: failed to ensure main worklet network exists: %v", err)
+	}
+	
+	// Connect to the main worklet network first
+	if err := nm.ConnectToNetwork(ctx, WorkletNetworkName); err != nil {
+		log.Printf("Warning: failed to connect to main worklet network: %v", err)
+	}
+
+	// Connect to all existing session networks
+	if err := nm.EnsureConnectedToAllNetworks(ctx); err != nil {
+		log.Printf("Warning: failed to connect to all networks: %v", err)
 	}
 
 	return nil
@@ -141,6 +158,60 @@ func (nm *NginxManager) Remove(ctx context.Context) error {
 	})
 }
 
+// ConnectToNetwork connects the nginx container to a specific network
+func (nm *NginxManager) ConnectToNetwork(ctx context.Context, networkName string) error {
+	exists, _, err := nm.containerStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to check container status: %w", err)
+	}
+
+	if !exists {
+		return fmt.Errorf("nginx container does not exist")
+	}
+
+	// Check if already connected
+	inspect, err := nm.client.ContainerInspect(ctx, nginxContainerName)
+	if err != nil {
+		return fmt.Errorf("failed to inspect container: %w", err)
+	}
+
+	// Check if already connected to this network
+	if _, connected := inspect.NetworkSettings.Networks[networkName]; connected {
+		return nil // Already connected
+	}
+
+	// Connect to the network
+	if err := nm.client.NetworkConnect(ctx, networkName, nginxContainerName, nil); err != nil {
+		// Ignore error if network doesn't exist or already connected
+		if !strings.Contains(err.Error(), "already exists") && !strings.Contains(err.Error(), "not found") {
+			return fmt.Errorf("failed to connect to network %s: %w", networkName, err)
+		}
+	}
+
+	log.Printf("Connected nginx to network: %s", networkName)
+	return nil
+}
+
+// EnsureConnectedToAllNetworks ensures nginx is connected to all worklet session networks
+func (nm *NginxManager) EnsureConnectedToAllNetworks(ctx context.Context) error {
+	// List all networks
+	networks, err := nm.client.NetworkList(ctx, network.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list networks: %w", err)
+	}
+
+	// Connect to all worklet networks including the main worklet-network
+	for _, net := range networks {
+		if strings.HasPrefix(net.Name, "worklet-") {
+			if err := nm.ConnectToNetwork(ctx, net.Name); err != nil {
+				log.Printf("Warning: failed to connect to network %s: %v", net.Name, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 // Reload reloads the nginx configuration
 func (nm *NginxManager) Reload(ctx context.Context) error {
 	exists, running, err := nm.containerStatus(ctx)
@@ -150,6 +221,11 @@ func (nm *NginxManager) Reload(ctx context.Context) error {
 
 	if !exists || !running {
 		return fmt.Errorf("nginx container is not running")
+	}
+
+	// Ensure connected to all networks before reloading
+	if err := nm.EnsureConnectedToAllNetworks(ctx); err != nil {
+		log.Printf("Warning: failed to ensure network connections: %v", err)
 	}
 
 	// Execute nginx reload command
