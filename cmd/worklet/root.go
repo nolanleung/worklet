@@ -67,10 +67,10 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(linkCmd)
-	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(terminalCmd)
 	rootCmd.AddCommand(refreshCmd)
 	rootCmd.AddCommand(forksCmd)
+	rootCmd.AddCommand(projectsCmd)
 }
 
 // isInteractiveTerminal checks if we're running in an interactive terminal

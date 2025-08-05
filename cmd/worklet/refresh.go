@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/nolanleung/worklet/pkg/daemon"
+	"github.com/nolanleung/worklet/internal/docker"
 	"github.com/spf13/cobra"
 )
 
@@ -15,80 +15,70 @@ var (
 )
 
 var refreshCmd = &cobra.Command{
-	Use:   "refresh [fork-id]",
-	Short: "Refresh fork information in the daemon",
-	Long: `Refresh fork information in the worklet daemon to update service discovery and nginx routing.
+	Use:   "refresh [session-id]",
+	Short: "Refresh session information",
+	Long: `Refresh session information to update service discovery.
 
-If no fork ID is provided and you're running inside a worklet session, the current session will be refreshed.
-Use --all to refresh all registered forks.`,
+If no session ID is provided and you're running inside a worklet session, the current session will be refreshed.
+Use --all to refresh all active sessions.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runRefresh,
 }
 
 func init() {
-	refreshCmd.Flags().BoolVar(&refreshAll, "all", false, "Refresh all registered forks")
+	refreshCmd.Flags().BoolVar(&refreshAll, "all", false, "Refresh all active sessions")
 }
 
 func runRefresh(cmd *cobra.Command, args []string) error {
-	socketPath := daemon.GetDefaultSocketPath()
-
-	// Check if daemon is running
-	if !daemon.IsDaemonRunning(socketPath) {
-		return fmt.Errorf("daemon is not running")
-	}
-
-	// Connect to daemon
-	client := daemon.NewClient(socketPath)
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to daemon: %w", err)
-	}
-	defer client.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if refreshAll {
-		// Refresh all forks
-		fmt.Println("Refreshing all forks...")
-		if err := client.RefreshAll(ctx); err != nil {
-			return fmt.Errorf("failed to refresh all forks: %w", err)
+		// List all sessions
+		fmt.Println("Refreshing all sessions...")
+		sessions, err := docker.ListSessions(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list sessions: %w", err)
 		}
-		fmt.Println("All forks refreshed successfully")
+		
+		fmt.Printf("Found %d active sessions\n", len(sessions))
+		for _, session := range sessions {
+			fmt.Printf("  - %s (%s)\n", session.SessionID, session.ProjectName)
+		}
 		return nil
 	}
 
-	// Determine fork ID to refresh
-	var forkID string
+	// Determine session ID to refresh
+	var sessionID string
 	if len(args) > 0 {
-		forkID = args[0]
+		sessionID = args[0]
 	} else {
 		// Try to detect current session ID from environment
-		sessionID := os.Getenv("WORKLET_SESSION_ID")
+		sessionID = os.Getenv("WORKLET_SESSION_ID")
 		if sessionID == "" {
-			return fmt.Errorf("no fork ID specified and WORKLET_SESSION_ID environment variable not set\n\nUsage:\n  worklet refresh <fork-id>  # Refresh specific fork\n  worklet refresh --all      # Refresh all forks\n\nUse 'worklet forks' to list available fork IDs")
+			return fmt.Errorf("no session ID specified and WORKLET_SESSION_ID environment variable not set\n\nUsage:\n  worklet refresh <session-id>  # Refresh specific session\n  worklet refresh --all         # Refresh all sessions\n\nUse 'worklet forks' to list available session IDs")
 		}
-		forkID = sessionID
-		fmt.Printf("No fork ID specified, using current session: %s\n", forkID)
+		fmt.Printf("No session ID specified, using current session: %s\n", sessionID)
 	}
 
-	// Refresh specific fork
-	fmt.Printf("Refreshing fork %s...\n", forkID)
-	if err := client.RefreshFork(ctx, forkID); err != nil {
-		return fmt.Errorf("failed to refresh fork: %w", err)
+	// Get session info
+	fmt.Printf("Refreshing session %s...\n", sessionID)
+	sessionInfo, err := docker.GetSessionInfo(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get session info: %w", err)
 	}
-	fmt.Printf("Fork %s refreshed successfully\n", forkID)
+	
+	fmt.Printf("Session %s refreshed successfully\n", sessionID)
 
-	// Show updated fork info
-	forkInfo, err := client.GetForkInfo(ctx, forkID)
-	if err == nil && forkInfo != nil {
-		fmt.Printf("\nUpdated fork information:\n")
-		fmt.Printf("  Project: %s\n", forkInfo.ProjectName)
-		fmt.Printf("  Container: %s\n", forkInfo.ContainerID[:12])
-		if len(forkInfo.Services) > 0 {
-			fmt.Printf("  Services:\n")
-			for _, svc := range forkInfo.Services {
-				fmt.Printf("    - %s (port %d)\n", svc.Name, svc.Port)
-			}
+	// Show updated session info
+	fmt.Printf("\nUpdated session information:\n")
+	fmt.Printf("  Project: %s\n", sessionInfo.ProjectName)
+	fmt.Printf("  Container: %s\n", sessionInfo.ContainerID[:12])
+	fmt.Printf("  Status: %s\n", sessionInfo.Status)
+	if len(sessionInfo.Services) > 0 {
+		fmt.Printf("  Services:\n")
+		for _, svc := range sessionInfo.Services {
+			fmt.Printf("    - %s (port %d)\n", svc.Name, svc.Port)
 		}
 	}
 

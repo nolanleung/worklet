@@ -3,15 +3,14 @@ package worklet
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/nolanleung/worklet/internal/docker"
 	"github.com/nolanleung/worklet/internal/projects"
-	"github.com/nolanleung/worklet/pkg/daemon"
 )
 
 // Styles for the interactive UI
@@ -46,37 +45,39 @@ var (
 
 // InteractiveModel represents the state of the interactive project selector
 type InteractiveModel struct {
-	projects      []projects.Project
-	forks         map[string]*daemon.ForkInfo        // Legacy: map by fork ID
-	projectForks  map[string][]daemon.ForkInfo       // New: map project path to all its forks
-	cursor        int
-	selected      int
-	quitting      bool
-	manager       *projects.Manager
-	width         int
-	height        int
-	showConfirm   bool
-	confirmMsg    string
-	confirmPath   string
-	action        string  // Track what action to perform after quit
-	showSessions  bool    // Show session selector for current project
-	sessionCursor int     // Cursor position in session list
+	projects       []projects.Project
+	sessions       []docker.SessionInfo               // All sessions
+	projectSessions map[string][]docker.SessionInfo   // Map project path to sessions
+	cursor         int
+	selected       int
+	quitting       bool
+	manager        *projects.Manager
+	width          int
+	height         int
+	showConfirm    bool
+	confirmMsg     string
+	confirmPath    string
+	action         string  // Track what action to perform after quit
+	showSessions   bool    // Show session selector for current project
+	sessionCursor  int     // Cursor position in session list
 }
 
 // InteractiveMsg types
 type projectsLoadedMsg []projects.Project
-type forksLoadedMsg struct {
-	byID   map[string]*daemon.ForkInfo   // Legacy: by fork ID
-	byPath map[string][]daemon.ForkInfo  // New: by project path
+type sessionsLoadedMsg struct {
+	sessions       []docker.SessionInfo
+	projectSessions map[string][]docker.SessionInfo
 }
 type actionCompleteMsg string
 type errorMsg error
+type tickMsg time.Time
 
 // Init initializes the model
 func (m InteractiveModel) Init() tea.Cmd {
 	return tea.Batch(
 		loadProjects(m.manager),
-		loadForks(),
+		loadSessions(),
+		tickCmd(), // Start auto-refresh ticker
 	)
 }
 
@@ -95,11 +96,11 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Check if this is a stop sessions confirmation
 				if strings.Contains(m.confirmMsg, "Stop all") {
 					// Stop all sessions for the project
-					sessions := m.projectForks[m.confirmPath]
+					sessions := m.projectSessions[m.confirmPath]
 					m.showConfirm = false
 					return m, tea.Batch(
-						stopAllSessions(sessions),
-						loadForks(), // Reload forks after stopping
+						stopAllSessionsDocker(sessions),
+						loadSessions(), // Reload sessions after stopping
 					)
 				} else {
 					// Perform the deletion
@@ -140,7 +141,7 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor < len(m.projects) {
 					project := m.projects[m.cursor]
 					absPath, _ := filepath.Abs(project.Path)
-					sessions := m.projectForks[absPath]
+					sessions := m.projectSessions[absPath]
 					if m.sessionCursor < len(sessions)-1 {
 						m.sessionCursor++
 					}
@@ -155,8 +156,20 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			if len(m.projects) > 0 {
-				// Start in background mode
-				return m, startProjectInBackground(m.projects[m.cursor].Path)
+				project := m.projects[m.cursor]
+				absPath, _ := filepath.Abs(project.Path)
+				sessions := m.projectSessions[absPath]
+				
+				// If sessions are expanded and we have sessions, attach to selected one
+				if m.showSessions && len(sessions) > 0 {
+					selectedSession := sessions[m.sessionCursor]
+					m.action = "attach:" + selectedSession.SessionID
+					m.quitting = true
+					return m, tea.Quit
+				} else {
+					// Otherwise start a new session in background mode
+					return m, startProjectInBackground(m.projects[m.cursor].Path)
+				}
 			}
 
 		case "a":
@@ -164,20 +177,20 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.projects) > 0 {
 				project := m.projects[m.cursor]
 				absPath, _ := filepath.Abs(project.Path)
-				sessions := m.projectForks[absPath]
+				sessions := m.projectSessions[absPath]
 				
 				if len(sessions) == 0 {
 					// No sessions to attach to
 					return m, nil
 				} else if len(sessions) == 1 {
 					// Single session - attach directly
-					m.action = "attach:" + sessions[0].ForkID
+					m.action = "attach:" + sessions[0].SessionID
 					m.quitting = true
 					return m, tea.Quit
 				} else if m.showSessions {
 					// Multiple sessions and session list is shown - attach to selected
 					selectedSession := sessions[m.sessionCursor]
-					m.action = "attach:" + selectedSession.ForkID
+					m.action = "attach:" + selectedSession.SessionID
 					m.quitting = true
 					return m, tea.Quit
 				} else {
@@ -187,25 +200,33 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		
-		case "s":
-			// Toggle session list display
+		case "right", "l", "tab":
+			// Expand sessions for current project
 			if len(m.projects) > 0 {
 				project := m.projects[m.cursor]
 				absPath, _ := filepath.Abs(project.Path)
-				sessions := m.projectForks[absPath]
-				if len(sessions) > 0 {
-					m.showSessions = !m.showSessions
-					if m.showSessions {
-						m.sessionCursor = 0
-					}
+				sessions := m.projectSessions[absPath]
+				if len(sessions) > 0 && !m.showSessions {
+					m.showSessions = true
+					m.sessionCursor = 0
 				}
 			}
 		
-		case "esc":
-			// Close session list if open
+		case "left", "h":
+			// Collapse sessions view
 			if m.showSessions {
 				m.showSessions = false
 				m.sessionCursor = 0
+			}
+		
+		case "esc":
+			// Close session list if open, otherwise quit
+			if m.showSessions {
+				m.showSessions = false
+				m.sessionCursor = 0
+			} else {
+				m.quitting = true
+				return m, tea.Quit
 			}
 		
 		case "S":
@@ -213,7 +234,7 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.projects) > 0 {
 				project := m.projects[m.cursor]
 				absPath, _ := filepath.Abs(project.Path)
-				sessions := m.projectForks[absPath]
+				sessions := m.projectSessions[absPath]
 				if len(sessions) > 0 {
 					m.confirmMsg = fmt.Sprintf("Stop all %d sessions for %s? (y/n)", len(sessions), project.Name)
 					m.showConfirm = true
@@ -243,7 +264,7 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Refresh
 			return m, tea.Batch(
 				loadProjects(m.manager),
-				loadForks(),
+				loadSessions(),
 			)
 		}
 
@@ -256,9 +277,9 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 		}
 
-	case forksLoadedMsg:
-		m.forks = msg.byID
-		m.projectForks = msg.byPath
+	case sessionsLoadedMsg:
+		m.sessions = msg.sessions
+		m.projectSessions = msg.projectSessions
 
 	case actionCompleteMsg:
 		// Handle various actions
@@ -269,12 +290,19 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		} else if action == "sessions_stopped" {
-			// Sessions were stopped, refresh the fork list
-			return m, loadForks()
+			// Sessions were stopped, refresh the sessions list
+			return m, loadSessions()
 		}
 
 	case errorMsg:
 		// Handle errors silently for now
+	
+	case tickMsg:
+		// Auto-refresh sessions every 2 seconds
+		return m, tea.Batch(
+			loadSessions(),  // Refresh sessions list
+			tickCmd(),      // Continue ticking
+		)
 	}
 
 	return m, nil
@@ -323,17 +351,28 @@ func (m InteractiveModel) View() string {
 
 		// Check for running sessions
 		absPath, _ := filepath.Abs(project.Path)
-		sessions := m.projectForks[absPath]
+		sessions := m.projectSessions[absPath]
 		sessionCount := len(sessions)
 
-		// Build the line
-		line := fmt.Sprintf("%s%-30s", cursor, name)
+		// Build the line with expansion indicator
+		var expandIndicator string
+		if sessionCount > 0 {
+			if m.cursor == i && m.showSessions {
+				expandIndicator = "▼ " // Expanded
+			} else if sessionCount > 0 {
+				expandIndicator = "▶ " // Collapsed
+			}
+		} else {
+			expandIndicator = "  " // No sessions
+		}
+		
+		line := fmt.Sprintf("%s%s%-28s", cursor, expandIndicator, name)
 		
 		if sessionCount > 0 {
 			if sessionCount == 1 {
-				line += runningStyle.Render(" ● 1 SESSION")
+				line += runningStyle.Render(" ● 1 session")
 			} else {
-				line += runningStyle.Render(fmt.Sprintf(" ● %d SESSIONS", sessionCount))
+				line += runningStyle.Render(fmt.Sprintf(" ● %d sessions", sessionCount))
 			}
 		}
 		
@@ -356,16 +395,16 @@ func (m InteractiveModel) View() string {
 			// Show sessions if any
 			if sessionCount > 0 && m.showSessions {
 				for j, session := range sessions {
-					sessionLine := "    "
+					sessionLine := "      "  // Extra indentation for hierarchy
 					if j == m.sessionCursor {
-						sessionLine += "> "
+						sessionLine += "▸ "  // Small right arrow for selected session
 					} else {
-						sessionLine += "  "
+						sessionLine += "• "  // Bullet for unselected session
 					}
 					
 					// Format session info
-					sessionAge := formatTimeAgo(session.RegisteredAt)
-					sessionLine += fmt.Sprintf("Session %s (started %s)", session.ForkID, sessionAge)
+					sessionAge := formatTimeAgo(session.CreatedAt)
+					sessionLine += fmt.Sprintf("Session %s • started %s", session.SessionID, sessionAge)
 					
 					if j == m.sessionCursor {
 						s.WriteString(selectedStyle.Render(sessionLine))
@@ -381,24 +420,24 @@ func (m InteractiveModel) View() string {
 	// Help text
 	s.WriteString("\n")
 	if m.showSessions {
-		helpText := "↑/↓ Navigate sessions • Enter/a: Attach • Esc: Back • q: Quit"
+		helpText := "↑/↓ Navigate • Enter: Attach • ← Collapse • q: Quit"
 		s.WriteString(helpStyle.Render(helpText))
 	} else {
-		helpText := "↑/↓ Navigate • Enter: Start • a: Attach • s: Show sessions • d: Remove • r: Refresh • q: Quit"
+		helpText := "↑/↓ Navigate • Enter: Start new • a: Attach • d: Remove • r: Refresh • q: Quit"
 		s.WriteString(helpStyle.Render(helpText))
 		
 		// Additional tips based on current project state
 		if m.cursor < len(m.projects) {
 			project := m.projects[m.cursor]
 			absPath, _ := filepath.Abs(project.Path)
-			sessions := m.projectForks[absPath]
+			sessions := m.projectSessions[absPath]
 			
 			if len(sessions) == 1 {
 				s.WriteString("\n")
 				s.WriteString(helpStyle.Render("Press 'a' to attach to the running session"))
 			} else if len(sessions) > 1 {
 				s.WriteString("\n")
-				s.WriteString(helpStyle.Render(fmt.Sprintf("Press 's' to show %d running sessions, 'a' to select", len(sessions))))
+				s.WriteString(helpStyle.Render(fmt.Sprintf("Press → to expand %d sessions • Press 'a' to attach", len(sessions))))
 			}
 		}
 	}
@@ -407,6 +446,12 @@ func (m InteractiveModel) View() string {
 }
 
 // Helper functions
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
 func loadProjects(manager *projects.Manager) tea.Cmd {
 	return func() tea.Msg {
 		projects := manager.List()
@@ -414,49 +459,33 @@ func loadProjects(manager *projects.Manager) tea.Cmd {
 	}
 }
 
-func loadForks() tea.Cmd {
+func loadSessions() tea.Cmd {
 	return func() tea.Msg {
-		socketPath := daemon.GetDefaultSocketPath()
-		if !daemon.IsDaemonRunning(socketPath) {
-			return forksLoadedMsg{}
-		}
-
-		client := daemon.NewClient(socketPath)
-		if err := client.Connect(); err != nil {
-			return forksLoadedMsg{}
-		}
-		defer client.Close()
-
-		// Create a context with timeout for the daemon call
+		// Create a context with timeout for the Docker API call
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		forks, err := client.ListForks(ctx)
+		sessions, err := docker.ListSessions(ctx)
 		if err != nil {
-			return forksLoadedMsg{}
+			return sessionsLoadedMsg{}
 		}
 
-		// Create both maps for backward compatibility and new functionality
-		forksMapByID := make(map[string]*daemon.ForkInfo)
-		forksMapByPath := make(map[string][]daemon.ForkInfo)
+		// Map sessions by project path
+		sessionsByPath := make(map[string][]docker.SessionInfo)
 		
-		for i := range forks {
-			fork := forks[i]
-			// Legacy map by ID
-			forksMapByID[fork.ForkID] = &fork
-			
-			// New map by path - normalize the path
-			if fork.WorkDir != "" {
-				absPath, err := filepath.Abs(fork.WorkDir)
+		for _, session := range sessions {
+			// Normalize the path
+			if session.WorkDir != "" {
+				absPath, err := filepath.Abs(session.WorkDir)
 				if err == nil {
-					forksMapByPath[absPath] = append(forksMapByPath[absPath], fork)
+					sessionsByPath[absPath] = append(sessionsByPath[absPath], session)
 				}
 			}
 		}
 
-		return forksLoadedMsg{
-			byID:   forksMapByID,
-			byPath: forksMapByPath,
+		return sessionsLoadedMsg{
+			sessions:        sessions,
+			projectSessions: sessionsByPath,
 		}
 	}
 }
@@ -509,12 +538,12 @@ func startProjectInBackground(path string) tea.Cmd {
 }
 
 // Command to stop all sessions for a project
-func stopAllSessions(sessions []daemon.ForkInfo) tea.Cmd {
+func stopAllSessionsDocker(sessions []docker.SessionInfo) tea.Cmd {
 	return func() tea.Msg {
+		ctx := context.Background()
 		for _, session := range sessions {
-			// Try to stop the container using docker stop
-			cmd := exec.Command("docker", "stop", session.ContainerID)
-			cmd.Run() // Ignore errors for now
+			// Stop the session using Docker API
+			docker.StopSession(ctx, session.SessionID)
 		}
 		return actionCompleteMsg("sessions_stopped")
 	}
@@ -555,18 +584,14 @@ func ShowProjectSelector() (string, string, error) {
 			path := strings.TrimPrefix(m.action, "background:")
 			return path, "background", nil
 		} else if strings.HasPrefix(m.action, "attach:") {
-			forkID := strings.TrimPrefix(m.action, "attach:")
-			// For attach action, we return the fork ID as path and "attach" as action
-			return forkID, "attach", nil
+			sessionID := strings.TrimPrefix(m.action, "attach:")
+			// For attach action, we return the session ID as path and "attach" as action
+			return sessionID, "attach", nil
 		}
 	}
 	
 	if m.selected >= 0 && m.selected < len(m.projects) {
 		project := m.projects[m.selected]
-		// Check if we should attach to existing session
-		if fork, exists := m.forks[project.ForkID]; exists && fork != nil {
-			return project.Path, "attach", nil
-		}
 		return project.Path, "", nil // Normal interactive run
 	}
 

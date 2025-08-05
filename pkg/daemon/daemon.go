@@ -15,6 +15,7 @@ import (
 	"time"
 	
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/nolanleung/worklet/internal/docker"
@@ -100,6 +101,9 @@ func (d *Daemon) Start() error {
 	
 	// Start cleanup routine
 	go d.cleanupRoutine()
+	
+	// Start Docker event listener for real-time container monitoring
+	go d.startEventListener()
 	
 	// Start nginx proxy container
 	if d.nginxManager != nil {
@@ -281,6 +285,20 @@ func (d *Daemon) handleUnregisterFork(msg *Message) *Message {
 }
 
 func (d *Daemon) handleListForks(msg *Message) *Message {
+	// First discover any containers that might have been started while daemon was down
+	// or containers that failed to register initially
+	if err := d.discoverContainers(); err != nil {
+		log.Printf("Warning: failed to discover containers before listing: %v", err)
+		// Continue anyway - we'll still return what we have
+	}
+	
+	// Then validate and cleanup stale forks
+	// This ensures the list is always fresh and accurate
+	if err := d.validateAndCleanupForks(); err != nil {
+		log.Printf("Warning: failed to validate forks before listing: %v", err)
+		// Continue anyway with potentially stale data
+	}
+	
 	d.forksMu.RLock()
 	forks := make([]ForkInfo, 0, len(d.forks))
 	for _, fork := range d.forks {
@@ -390,7 +408,7 @@ func (d *Daemon) handleRequestForkID(msg *Message) *Message {
 
 // cleanupRoutine periodically cleans up stale fork registrations
 func (d *Daemon) cleanupRoutine() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(1 * time.Minute) // Reduced from 5 minutes for faster cleanup
 	defer ticker.Stop()
 	
 	for {
@@ -807,6 +825,81 @@ func (d *Daemon) updateNginxConfig() {
 	}
 	
 	log.Printf("Updated nginx configuration with %d services", len(services))
+}
+
+// startEventListener listens for Docker container events and updates fork state in real-time
+func (d *Daemon) startEventListener() {
+	// Create Docker client
+	cli, err := client.NewClientWithOpts(client.FromEnv)
+	if err != nil {
+		log.Printf("Failed to create Docker client for event listener: %v", err)
+		return
+	}
+	defer cli.Close()
+	
+	// Set up filters for worklet containers
+	eventFilters := filters.NewArgs()
+	eventFilters.Add("type", string(events.ContainerEventType))
+	eventFilters.Add("label", "worklet.session=true")
+	
+	// Subscribe to events
+	eventsChan, errChan := cli.Events(d.ctx, events.ListOptions{
+		Filters: eventFilters,
+	})
+	
+	log.Printf("Started Docker event listener for worklet containers")
+	
+	for {
+		select {
+		case event := <-eventsChan:
+			// Handle container lifecycle events
+			switch event.Action {
+			case "die", "stop", "kill", "remove":
+				// Extract session ID from event attributes
+				sessionID := event.Actor.Attributes["worklet.session.id"]
+				if sessionID != "" {
+					d.handleContainerRemoved(sessionID)
+				}
+			case "start":
+				// When a container starts, re-discover to pick it up
+				if err := d.discoverContainers(); err != nil {
+					log.Printf("Failed to discover containers after start event: %v", err)
+				}
+			}
+		case err := <-errChan:
+			if err != nil {
+				log.Printf("Docker event stream error: %v", err)
+				// Try to reconnect after a delay
+				time.Sleep(5 * time.Second)
+				go d.startEventListener() // Restart the listener
+				return
+			}
+		case <-d.ctx.Done():
+			log.Printf("Stopping Docker event listener")
+			return
+		}
+	}
+}
+
+// handleContainerRemoved removes a fork when its container is removed
+func (d *Daemon) handleContainerRemoved(sessionID string) {
+	d.forksMu.Lock()
+	defer d.forksMu.Unlock()
+	
+	if fork, exists := d.forks[sessionID]; exists {
+		log.Printf("Container for session %s was removed, cleaning up fork registration", sessionID)
+		delete(d.forks, sessionID)
+		
+		// Update nginx configuration
+		d.updateNginxConfig()
+		
+		// Log the removal
+		if fork.ProjectName != "" {
+			log.Printf("Removed fork %s (project: %s) due to container removal", sessionID, fork.ProjectName)
+		} else {
+			log.Printf("Removed fork %s due to container removal", sessionID)
+		}
+	}
 }
 
 // Helper functions
