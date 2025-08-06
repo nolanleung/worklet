@@ -146,6 +146,9 @@ func RunContainer(opts RunOptions) error {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
 	}
 
+	// Disable Corepack prompts for Node.js projects
+	args = append(args, "-e", "COREPACK_ENABLE_DOWNLOAD_PROMPT=0")
+
 	// Add session ID environment variable
 	args = append(args, "-e", fmt.Sprintf("WORKLET_SESSION_ID=%s", opts.SessionID))
 	
@@ -336,6 +339,9 @@ func RunContainerDetached(opts RunOptions) (string, error) {
 	for key, value := range opts.Config.Run.Environment {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
 	}
+
+	// Disable Corepack prompts for Node.js projects
+	args = append(args, "-e", "COREPACK_ENABLE_DOWNLOAD_PROMPT=0")
 
 	// Add session ID environment variable
 	args = append(args, "-e", fmt.Sprintf("WORKLET_SESSION_ID=%s", opts.SessionID))

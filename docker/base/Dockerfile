@@ -163,6 +163,8 @@ ENV PATH="${PATH}:/usr/local/bun-node-fallback-bin"
 
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
+# Disable Corepack download prompts
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
 
 # Install PNPM globally
