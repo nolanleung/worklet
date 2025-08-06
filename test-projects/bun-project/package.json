@@ -1,0 +1,10 @@
+{
+  "name": "bun-test",
+  "scripts": {
+    "start": "bun run index.ts"
+  },
+  "dependencies": {
+    "hono": "^3.0.0"
+  }
+}
+EOF && touch test-projects/bun-project/bun.lockb < /dev/null

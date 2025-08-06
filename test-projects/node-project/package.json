@@ -1,0 +1,8 @@
+{
+  "name": "test-project",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  }
+}
+EOF < /dev/null

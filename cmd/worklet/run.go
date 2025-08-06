@@ -4,13 +4,19 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/google/uuid"
 	"github.com/nolanleung/worklet/internal/config"
 	"github.com/nolanleung/worklet/internal/docker"
@@ -29,40 +35,85 @@ var (
 )
 
 var runCmd = &cobra.Command{
-	Use:   "run [command]",
-	Short: "Run the repository in a Docker container with Docker-in-Docker support",
-	Long: `Runs the repository in a Docker container with Docker-in-Docker capabilities based on .worklet.jsonc configuration.
+	Use:   "run [git-url|path] [command]",
+	Short: "Run a repository or git URL in a Docker container with Docker-in-Docker support",
+	Long: `Runs a repository in a Docker container with Docker-in-Docker capabilities based on .worklet.jsonc configuration.
 
 By default, worklet run creates a persistent isolated environment. Use --mount to run directly in the current directory, or --temp to create a temporary environment that auto-cleans up.
 
 Examples:
-  worklet run                    # Run in persistent isolated environment
-  worklet run --mount            # Run with current directory mounted
-  worklet run --temp             # Run in temporary environment
-  worklet run echo "hello"       # Run echo command
-  worklet run python app.py      # Run Python script
-  worklet run npm test           # Run npm test`,
+  worklet run                                       # Run in persistent isolated environment
+  worklet run --mount                               # Run with current directory mounted
+  worklet run --temp                                # Run in temporary environment
+  worklet run echo "hello"                          # Run echo command
+  worklet run python app.py                         # Run Python script
+  worklet run npm test                              # Run npm test
+  worklet run https://github.com/user/repo          # Clone and run a git repository
+  worklet run github.com/user/repo                  # Clone and run (shortened format)
+  worklet run git@github.com:user/repo.git          # Clone and run (SSH format)`,
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("failed to get current directory: %w", err)
-		}
-
 		// Handle conflicting flags
 		if withTerminal && noTerminal {
 			withTerminal = false
 		}
 
-		// If mount mode, run directly in current directory
-		if mountMode {
-			return RunInDirectory(cwd, args...)
+		var workDir string
+		var cmdArgs []string
+		var isClonedRepo bool
+		var shouldCleanup bool
+
+		// Check if first argument is a git URL
+		if len(args) > 0 && isGitURL(args[0]) {
+			// Extract repository name for temp directory
+			repoName := extractRepoNameFromURL(args[0])
+			
+			// Create temporary directory
+			tempDir, err := createTempDirectory(repoName)
+			if err != nil {
+				return fmt.Errorf("failed to create temporary directory: %w", err)
+			}
+
+			// Clone the repository
+			if err := cloneRepository(args[0], tempDir); err != nil {
+				// Clean up on failure
+				cleanupTempDirectory(tempDir)
+				return fmt.Errorf("failed to clone repository: %w", err)
+			}
+
+			workDir = tempDir
+			cmdArgs = args[1:] // Remove the URL from command args
+			isClonedRepo = true
+			shouldCleanup = tempMode || !mountMode // Clean up unless explicitly mounting
+
+			// Config detection will happen automatically in RunInDirectory
+		} else {
+			// Use current directory
+			var err error
+			workDir, err = os.Getwd()
+			if err != nil {
+				return fmt.Errorf("failed to get current directory: %w", err)
+			}
+			cmdArgs = args
 		}
 
-		// TODO: Implement isolated environment creation
-		// For now, just run in current directory
-		fmt.Println("Note: Isolated environment creation not yet implemented, running in current directory")
-		return RunInDirectory(cwd, args...)
+		// Set up cleanup for cloned repositories
+		if isClonedRepo && shouldCleanup {
+			defer func() {
+				if err := cleanupTempDirectory(workDir); err != nil {
+					log.Printf("Warning: Failed to clean up temporary directory: %v", err)
+				}
+			}()
+		}
+
+		// If mount mode is explicitly set for a cloned repo, inform the user
+		if mountMode && isClonedRepo {
+			fmt.Printf("Repository cloned to: %s\n", workDir)
+			fmt.Println("Note: Using --mount with a git URL will preserve the cloned directory")
+		}
+
+		// Run in the determined directory
+		return RunInDirectory(workDir, cmdArgs...)
 	},
 }
 
@@ -119,10 +170,10 @@ func AttachToContainer(sessionID string) error {
 
 // runInDirectoryWithMode runs worklet with specified attach mode
 func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error {
-	// Load config
-	cfg, err := config.LoadConfig(dir)
+	// Load config or detect project type
+	cfg, err := config.LoadConfigOrDetect(dir)
 	if err != nil {
-		return fmt.Errorf("failed to load .worklet.jsonc: %w", err)
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	// Track project in history
@@ -352,4 +403,254 @@ func openBrowserURL(url string) error {
 	}
 
 	return exec.Command(cmd, args...).Start()
+}
+
+// isGitURL checks if the given string is a git URL
+func isGitURL(arg string) bool {
+	// Check for common git URL patterns
+	gitURLPatterns := []string{
+		`^https?://`,                            // HTTP(S) URLs
+		`^git@`,                                 // SSH URLs like git@github.com:user/repo.git
+		`^ssh://`,                               // SSH URLs
+		`^git://`,                               // Git protocol URLs
+		`^(github\.com|gitlab\.com|bitbucket\.)`, // Common git hosting services without protocol
+	}
+
+	for _, pattern := range gitURLPatterns {
+		if matched, _ := regexp.MatchString(pattern, arg); matched {
+			return true
+		}
+	}
+
+	// Also check if it looks like a github/gitlab shorthand (e.g., "user/repo")
+	if matched, _ := regexp.MatchString(`^[\w-]+/[\w.-]+$`, arg); matched {
+		return true
+	}
+
+	return false
+}
+
+// normalizeGitURL converts various git URL formats to a standard format
+func normalizeGitURL(urlStr string) string {
+	// Handle shortened formats like "github.com/user/repo"
+	if !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") && 
+	   !strings.HasPrefix(urlStr, "git@") && !strings.HasPrefix(urlStr, "ssh://") && 
+	   !strings.HasPrefix(urlStr, "git://") {
+		// Check if it's a github/gitlab/bitbucket shorthand
+		if strings.HasPrefix(urlStr, "github.com/") || 
+		   strings.HasPrefix(urlStr, "gitlab.com/") || 
+		   strings.HasPrefix(urlStr, "bitbucket.org/") {
+			urlStr = "https://" + urlStr
+		} else if matched, _ := regexp.MatchString(`^[\w-]+/[\w.-]+$`, urlStr); matched {
+			// Assume GitHub for "user/repo" format
+			urlStr = "https://github.com/" + urlStr
+		}
+	}
+
+	// Ensure .git suffix for consistency
+	if !strings.HasSuffix(urlStr, ".git") && 
+	   (strings.Contains(urlStr, "github.com") || 
+	    strings.Contains(urlStr, "gitlab.com") || 
+	    strings.Contains(urlStr, "bitbucket.org")) {
+		urlStr += ".git"
+	}
+
+	return urlStr
+}
+
+// cloneRepository clones a git repository to a target directory
+func cloneRepository(gitURL, targetDir string) error {
+	normalizedURL := normalizeGitURL(gitURL)
+	
+	fmt.Printf("Cloning repository from %s...\n", normalizedURL)
+
+	// Configure clone options
+	cloneOpts := &git.CloneOptions{
+		URL:      normalizedURL,
+		Progress: os.Stdout,
+		Depth:    1, // Shallow clone for faster cloning
+	}
+
+	// Try to determine and set up authentication
+	auth, err := getGitAuth(normalizedURL)
+	if err == nil && auth != nil {
+		cloneOpts.Auth = auth
+	}
+
+	// Perform the clone
+	_, err = git.PlainClone(targetDir, false, cloneOpts)
+	if err != nil {
+		if err == transport.ErrAuthenticationRequired {
+			return fmt.Errorf("authentication required to clone repository. Please ensure you have proper credentials configured")
+		}
+		return fmt.Errorf("failed to clone repository: %w", err)
+	}
+
+	fmt.Println("Repository cloned successfully")
+	return nil
+}
+
+// getGitAuth attempts to get authentication for git operations
+func getGitAuth(gitURL string) (transport.AuthMethod, error) {
+	// Parse the URL to determine the protocol
+	u, err := url.Parse(gitURL)
+	if err != nil {
+		// Try alternative parsing for SSH URLs
+		if strings.HasPrefix(gitURL, "git@") {
+			// SSH authentication
+			return getSshAuth()
+		}
+		return nil, err
+	}
+
+	switch u.Scheme {
+	case "https", "http":
+		// Try to get credentials from environment or git credential helper
+		return getHttpAuth()
+	case "ssh", "git":
+		return getSshAuth()
+	default:
+		if strings.HasPrefix(gitURL, "git@") {
+			return getSshAuth()
+		}
+	}
+
+	return nil, nil
+}
+
+// getHttpAuth gets HTTP authentication from environment variables
+func getHttpAuth() (transport.AuthMethod, error) {
+	// Check for GitHub token
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		return &http.BasicAuth{
+			Username: "oauth2",
+			Password: token,
+		}, nil
+	}
+
+	// Check for GitLab token
+	if token := os.Getenv("GITLAB_TOKEN"); token != "" {
+		return &http.BasicAuth{
+			Username: "oauth2",
+			Password: token,
+		}, nil
+	}
+
+	// Check for generic git credentials
+	if username := os.Getenv("GIT_USERNAME"); username != "" {
+		if password := os.Getenv("GIT_PASSWORD"); password != "" {
+			return &http.BasicAuth{
+				Username: username,
+				Password: password,
+			}, nil
+		}
+	}
+
+	return nil, nil
+}
+
+// getSshAuth gets SSH authentication
+func getSshAuth() (transport.AuthMethod, error) {
+	// Try to use SSH agent first
+	auth, err := ssh.NewSSHAgentAuth("git")
+	if err == nil {
+		return auth, nil
+	}
+
+	// Fall back to default SSH key
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+
+	// Try common SSH key locations
+	keyPaths := []string{
+		filepath.Join(homeDir, ".ssh", "id_rsa"),
+		filepath.Join(homeDir, ".ssh", "id_ed25519"),
+		filepath.Join(homeDir, ".ssh", "id_ecdsa"),
+	}
+
+	for _, keyPath := range keyPaths {
+		if _, err := os.Stat(keyPath); err == nil {
+			auth, err := ssh.NewPublicKeysFromFile("git", keyPath, "")
+			if err == nil {
+				return auth, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("no SSH key found")
+}
+
+// createTempDirectory creates a temporary directory for cloned repositories
+func createTempDirectory(repoName string) (string, error) {
+	// Create a base temporary directory for worklet
+	baseDir := filepath.Join(os.TempDir(), "worklet-repos")
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create base temp directory: %w", err)
+	}
+
+	// Extract repo name from URL if needed
+	if repoName == "" {
+		repoName = "repo"
+	} else {
+		// Clean the repo name to be filesystem-safe
+		repoName = filepath.Base(repoName)
+		repoName = strings.TrimSuffix(repoName, ".git")
+	}
+
+	// Create a unique directory name with timestamp
+	timestamp := time.Now().Format("20060102-150405")
+	dirName := fmt.Sprintf("%s-%s-%s", repoName, timestamp, uuid.New().String()[:8])
+	tempDir := filepath.Join(baseDir, dirName)
+
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	return tempDir, nil
+}
+
+// cleanupTempDirectory removes a temporary directory
+func cleanupTempDirectory(dir string) error {
+	// Only clean up if it's in the worklet temp directory
+	baseDir := filepath.Join(os.TempDir(), "worklet-repos")
+	if !strings.HasPrefix(dir, baseDir) {
+		return fmt.Errorf("refusing to clean non-temporary directory: %s", dir)
+	}
+
+	fmt.Printf("Cleaning up temporary directory: %s\n", dir)
+	return os.RemoveAll(dir)
+}
+
+// extractRepoNameFromURL extracts repository name from git URL
+func extractRepoNameFromURL(gitURL string) string {
+	// Normalize the URL first
+	normalizedURL := normalizeGitURL(gitURL)
+	
+	// Try to parse as URL
+	u, err := url.Parse(normalizedURL)
+	if err == nil && u.Path != "" {
+		// Extract the repository name from the path
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(parts) > 0 {
+			repoName := parts[len(parts)-1]
+			return strings.TrimSuffix(repoName, ".git")
+		}
+	}
+
+	// Handle SSH format (git@github.com:user/repo.git)
+	if strings.HasPrefix(normalizedURL, "git@") {
+		parts := strings.Split(normalizedURL, ":")
+		if len(parts) == 2 {
+			pathParts := strings.Split(parts[1], "/")
+			if len(pathParts) > 0 {
+				repoName := pathParts[len(pathParts)-1]
+				return strings.TrimSuffix(repoName, ".git")
+			}
+		}
+	}
+
+	// Fallback to generic name
+	return "repository"
 }

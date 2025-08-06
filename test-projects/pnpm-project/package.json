@@ -1,0 +1,11 @@
+{
+  "name": "pnpm-test",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "vite": "^4.0.0"
+  }
+}
+EOF && touch test-projects/pnpm-project/pnpm-lock.yaml < /dev/null

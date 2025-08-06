@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tidwall/jsonc"
 )
@@ -54,4 +55,44 @@ func LoadConfig(dir string) (*WorkletConfig, error) {
 	}
 
 	return &config, nil
+}
+
+// LoadConfigOrDetect loads config from .worklet.jsonc or detects project type
+func LoadConfigOrDetect(dir string) (*WorkletConfig, error) {
+	// First try to load existing config
+	config, err := LoadConfig(dir)
+	if err == nil {
+		return config, nil
+	}
+
+	// If config doesn't exist, try to detect project type
+	if os.IsNotExist(err) || strings.Contains(err.Error(), "no such file") {
+		projectType, detectErr := DetectProjectType(dir)
+		if detectErr != nil {
+			return nil, fmt.Errorf("failed to detect project type: %w", detectErr)
+		}
+
+		// Generate default config based on detected type
+		defaultConfig, genErr := GenerateDefaultConfig(dir, projectType)
+		if genErr != nil {
+			return nil, genErr
+		}
+
+		// Log what we detected
+		if projectType == ProjectTypeNodeJS {
+			packageManager := DetectPackageManager(dir)
+			scriptName := defaultConfig.Run.Command[len(defaultConfig.Run.Command)-1]
+			if packageManager != "deno" {
+				fmt.Printf("No .worklet.jsonc found. Detected Node.js project, will run '%s install' then '%s run %s'\n", 
+					packageManager, packageManager, scriptName)
+			} else {
+				fmt.Printf("No .worklet.jsonc found. Detected Deno project, using 'deno task %s'\n", scriptName)
+			}
+		}
+
+		return defaultConfig, nil
+	}
+
+	// If it's another error, return it
+	return nil, err
 }

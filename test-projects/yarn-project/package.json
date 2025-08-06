@@ -1,0 +1,11 @@
+{
+  "name": "yarn-test",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0"
+  }
+}
+EOF && touch test-projects/yarn-project/yarn.lock < /dev/null
