@@ -144,7 +144,7 @@ func RunInBackground(dir string, cmdArgs ...string) error {
 	return runInDirectoryWithMode(dir, true, cmdArgs...)
 }
 
-// AttachToContainer attaches to an existing container for a session
+// AttachToContainer executes an interactive shell in an existing container for a session
 func AttachToContainer(sessionID string) error {
 	// Try to find the container by session ID label
 	checkCmd := exec.Command("docker", "ps", "-q", "-f", fmt.Sprintf("label=worklet.session.id=%s", sessionID))
@@ -160,17 +160,24 @@ func AttachToContainer(sessionID string) error {
 	nameOutput, _ := nameCmd.Output()
 	containerName := strings.TrimPrefix(strings.TrimSpace(string(nameOutput)), "/")
 	
-	// Try to attach using docker attach command
-	cmd := exec.Command("docker", "attach", containerID)
+	// Execute an interactive shell using docker exec
+	cmd := exec.Command("docker", "exec", "-it", containerID, "/bin/bash")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	
-	fmt.Printf("Attaching to container %s...\n", containerName)
-	fmt.Println("Tip: Use Ctrl+P, Ctrl+Q to detach without stopping the container")
+	fmt.Printf("Starting shell in container %s...\n", containerName)
 	
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to attach to container: %w", err)
+		// If /bin/bash fails, try /bin/sh as fallback
+		cmd = exec.Command("docker", "exec", "-it", containerID, "/bin/sh")
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to execute shell in container: %w", err)
+		}
 	}
 	
 	return nil
