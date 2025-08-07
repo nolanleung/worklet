@@ -191,6 +191,29 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+// TriggerDiscovery triggers the daemon to discover containers immediately
+func (c *Client) TriggerDiscovery(ctx context.Context) error {
+	msg := Message{
+		Type: MsgTriggerDiscovery,
+		ID:   uuid.New().String(),
+	}
+	
+	resp, err := c.sendRequest(ctx, &msg)
+	if err != nil {
+		return err
+	}
+	
+	if resp.Type != MsgSuccess {
+		var errorResp ErrorResponse
+		if err := json.Unmarshal(resp.Payload, &errorResp); err == nil {
+			return fmt.Errorf("failed to trigger discovery: %s", errorResp.Error)
+		}
+		return fmt.Errorf("unexpected response type: %s", resp.Type)
+	}
+	
+	return nil
+}
+
 // sendRequest sends a request and waits for a response
 func (c *Client) sendRequest(ctx context.Context, msg *Message) (*Message, error) {
 	if c.conn == nil {

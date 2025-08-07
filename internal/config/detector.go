@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ProjectType represents the detected project type
@@ -151,12 +152,67 @@ func DetectNodeCommand(dir string) ([]string, error) {
 	}
 }
 
+// DetectEnvExampleFiles finds all .env.example files in the project directory
+func DetectEnvExampleFiles(dir string) ([]string, error) {
+	var envFiles []string
+	
+	// Patterns to look for
+	patterns := []string{
+		".env.example",
+		".env.sample",
+		".env.template",
+	}
+	
+	// Walk through the directory to find env example files
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip files we can't access
+		}
+		
+		// Skip directories
+		if info.IsDir() {
+			// Skip node_modules and other common directories
+			if info.Name() == "node_modules" || info.Name() == ".git" || info.Name() == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		
+		// Check if file matches any of our patterns
+		fileName := info.Name()
+		for _, pattern := range patterns {
+			if fileName == pattern {
+				// Get relative path from the project root
+				relPath, err := filepath.Rel(dir, path)
+				if err != nil {
+					continue
+				}
+				envFiles = append(envFiles, relPath)
+				break
+			}
+		}
+		
+		return nil
+	})
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	return envFiles, nil
+}
+
 // GenerateDefaultConfig generates a default config based on detected project type
 func GenerateDefaultConfig(dir string, projectType ProjectType) (*WorkletConfig, error) {
 	projectName := filepath.Base(dir)
 
 	switch projectType {
 	case ProjectTypeNodeJS:
+		// Try to use package.json name if available
+		if pkg, err := ReadPackageJSON(dir); err == nil && pkg.Name != "" {
+			projectName = pkg.Name
+		}
+		
 		command, err := DetectNodeCommand(dir)
 		if err != nil {
 			return nil, err
@@ -167,6 +223,25 @@ func GenerateDefaultConfig(dir string, projectType ProjectType) (*WorkletConfig,
 		
 		// Build init script with install command
 		var initScript []string
+		
+		// Detect and copy .env.example files
+		envExampleFiles, _ := DetectEnvExampleFiles(dir)
+		for _, exampleFile := range envExampleFiles {
+			// Get the target .env file path by removing the .example/.sample/.template suffix
+			var targetFile string
+			if strings.HasSuffix(exampleFile, ".example") {
+				targetFile = strings.TrimSuffix(exampleFile, ".example")
+			} else if strings.HasSuffix(exampleFile, ".sample") {
+				targetFile = strings.TrimSuffix(exampleFile, ".sample")
+			} else if strings.HasSuffix(exampleFile, ".template") {
+				targetFile = strings.TrimSuffix(exampleFile, ".template")
+			}
+			
+			// Add copy command that only copies if target doesn't exist
+			copyCmd := fmt.Sprintf("[ ! -f %s ] && cp %s %s && echo 'Created %s from %s' || true", 
+				targetFile, exampleFile, targetFile, targetFile, exampleFile)
+			initScript = append(initScript, copyCmd)
+		}
 		
 		// Skip install for Deno as it downloads dependencies on demand
 		if packageManager != "deno" {

@@ -212,6 +212,8 @@ func (d *Daemon) handleMessage(msg *Message) *Message {
 			Type: MsgSuccess,
 			ID:   msg.ID,
 		}
+	case MsgTriggerDiscovery:
+		return d.handleTriggerDiscovery(msg)
 	default:
 		return &Message{
 			Type: MsgError,
@@ -384,6 +386,27 @@ func (d *Daemon) handleRefreshAll(msg *Message) *Message {
 		ID:   msg.ID,
 		Payload: mustMarshal(SuccessResponse{
 			Message: fmt.Sprintf("Refreshed %d fork(s)", count),
+		}),
+	}
+}
+
+func (d *Daemon) handleTriggerDiscovery(msg *Message) *Message {
+	// Trigger container discovery immediately
+	if err := d.discoverContainers(); err != nil {
+		return &Message{
+			Type: MsgError,
+			ID:   msg.ID,
+			Payload: mustMarshal(ErrorResponse{
+				Error: fmt.Sprintf("failed to discover containers: %v", err),
+			}),
+		}
+	}
+	
+	return &Message{
+		Type: MsgSuccess,
+		ID:   msg.ID,
+		Payload: mustMarshal(SuccessResponse{
+			Message: "Container discovery triggered",
 		}),
 	}
 }
@@ -596,6 +619,17 @@ func (d *Daemon) discoverContainers() error {
 			for _, svc := range serviceMap {
 				services = append(services, *svc)
 			}
+		}
+		
+		// If still no services defined, add a default service
+		// This ensures containers without explicit services still get nginx routing
+		if len(services) == 0 {
+			services = append(services, ServiceInfo{
+				Name:      "app",
+				Port:      3000,
+				Subdomain: "app",
+			})
+			log.Printf("No services defined for fork %s, using default service (app:3000)", forkID)
 		}
 		
 		// Ensure forks map is initialized (defensive check)

@@ -10,15 +10,16 @@ type MessageType string
 
 const (
 	// Client -> Daemon messages
-	MsgRegisterFork   MessageType = "REGISTER_FORK"
-	MsgUnregisterFork MessageType = "UNREGISTER_FORK"
-	MsgListForks      MessageType = "LIST_FORKS"
-	MsgGetForkInfo    MessageType = "GET_FORK_INFO"
-	MsgProxyRegister  MessageType = "PROXY_REGISTER"
-	MsgHealthCheck    MessageType = "HEALTH_CHECK"
-	MsgRefreshFork    MessageType = "REFRESH_FORK"
-	MsgRefreshAll     MessageType = "REFRESH_ALL"
-	MsgRequestForkID  MessageType = "REQUEST_FORK_ID"
+	MsgRegisterFork     MessageType = "REGISTER_FORK"
+	MsgUnregisterFork   MessageType = "UNREGISTER_FORK"
+	MsgListForks        MessageType = "LIST_FORKS"
+	MsgGetForkInfo      MessageType = "GET_FORK_INFO"
+	MsgProxyRegister    MessageType = "PROXY_REGISTER"
+	MsgHealthCheck      MessageType = "HEALTH_CHECK"
+	MsgRefreshFork      MessageType = "REFRESH_FORK"
+	MsgRefreshAll       MessageType = "REFRESH_ALL"
+	MsgRequestForkID    MessageType = "REQUEST_FORK_ID"
+	MsgTriggerDiscovery MessageType = "TRIGGER_DISCOVERY"
 	
 	// Daemon -> Client responses
 	MsgSuccess        MessageType = "SUCCESS"

@@ -114,6 +114,22 @@ func RunContainer(opts RunOptions) error {
 
 		// Set isolation mode environment variable
 		args = append(args, "-e", "WORKLET_ISOLATION=full")
+		
+		// Create and mount Docker storage volumes for caching only images (not container state)
+		// We mount specific subdirectories to avoid persisting container state which causes conflicts
+		dockerImageVolume := fmt.Sprintf("worklet-docker-images-%s", projectName)
+		dockerOverlayVolume := fmt.Sprintf("worklet-docker-overlay-%s", projectName)
+		
+		if err := ensureDockerVolumeExists(dockerImageVolume); err != nil {
+			return fmt.Errorf("failed to create Docker image volume: %w", err)
+		}
+		if err := ensureDockerVolumeExists(dockerOverlayVolume); err != nil {
+			return fmt.Errorf("failed to create Docker overlay volume: %w", err)
+		}
+		
+		// Mount only the image and overlay directories to cache layers but not container state
+		args = append(args, "-v", fmt.Sprintf("%s:/var/lib/docker/image", dockerImageVolume))
+		args = append(args, "-v", fmt.Sprintf("%s:/var/lib/docker/overlay2", dockerOverlayVolume))
 
 		// Mount the entrypoint script
 		scriptPath, err := getEntrypointScriptPath()
@@ -192,6 +208,15 @@ func RunContainer(opts RunOptions) error {
 	// Add additional volumes
 	for _, volume := range opts.Config.Run.Volumes {
 		args = append(args, "-v", volume)
+	}
+	
+	// Add pnpm store volume if this is a pnpm project
+	if _, err := os.Stat(filepath.Join(opts.WorkDir, "pnpm-lock.yaml")); err == nil {
+		pnpmStoreVolume := fmt.Sprintf("worklet-pnpm-store-%s", projectName)
+		if err := ensureDockerVolumeExists(pnpmStoreVolume); err != nil {
+			return fmt.Errorf("failed to create pnpm store volume: %w", err)
+		}
+		args = append(args, "-v", fmt.Sprintf("%s:/pnpm/store", pnpmStoreVolume))
 	}
 
 	// Add credential volumes if configured
@@ -310,6 +335,22 @@ func RunContainerDetached(opts RunOptions) (string, error) {
 		// Full isolation with Docker-in-Docker
 		args = append(args, "--privileged")
 		args = append(args, "-e", "WORKLET_ISOLATION=full")
+		
+		// Create and mount Docker storage volumes for caching only images (not container state)
+		// We mount specific subdirectories to avoid persisting container state which causes conflicts
+		dockerImageVolume := fmt.Sprintf("worklet-docker-images-%s", projectName)
+		dockerOverlayVolume := fmt.Sprintf("worklet-docker-overlay-%s", projectName)
+		
+		if err := ensureDockerVolumeExists(dockerImageVolume); err != nil {
+			return "", fmt.Errorf("failed to create Docker image volume: %w", err)
+		}
+		if err := ensureDockerVolumeExists(dockerOverlayVolume); err != nil {
+			return "", fmt.Errorf("failed to create Docker overlay volume: %w", err)
+		}
+		
+		// Mount only the image and overlay directories to cache layers but not container state
+		args = append(args, "-v", fmt.Sprintf("%s:/var/lib/docker/image", dockerImageVolume))
+		args = append(args, "-v", fmt.Sprintf("%s:/var/lib/docker/overlay2", dockerOverlayVolume))
 
 		// Mount the entrypoint script
 		scriptPath, err := getEntrypointScriptPath()
@@ -381,6 +422,15 @@ func RunContainerDetached(opts RunOptions) (string, error) {
 	// Add additional volumes
 	for _, volume := range opts.Config.Run.Volumes {
 		args = append(args, "-v", volume)
+	}
+	
+	// Add pnpm store volume if this is a pnpm project
+	if _, err := os.Stat(filepath.Join(opts.WorkDir, "pnpm-lock.yaml")); err == nil {
+		pnpmStoreVolume := fmt.Sprintf("worklet-pnpm-store-%s", projectName)
+		if err := ensureDockerVolumeExists(pnpmStoreVolume); err != nil {
+			return "", fmt.Errorf("failed to create pnpm store volume: %w", err)
+		}
+		args = append(args, "-v", fmt.Sprintf("%s:/pnpm/store", pnpmStoreVolume))
 	}
 
 	// Add credential volumes if configured
@@ -582,6 +632,24 @@ func copyWorkspace(src, dst string, excludePatterns []string) error {
 		// Copy file
 		return copyFile(path, dstPath)
 	})
+}
+
+// ensureDockerVolumeExists creates a Docker volume if it doesn't exist
+func ensureDockerVolumeExists(volumeName string) error {
+	// Check if volume already exists
+	cmd := exec.Command("docker", "volume", "inspect", volumeName)
+	if err := cmd.Run(); err == nil {
+		// Volume already exists
+		return nil
+	}
+	
+	// Create the volume
+	cmd = exec.Command("docker", "volume", "create", volumeName)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create Docker volume %s: %w", volumeName, err)
+	}
+	
+	return nil
 }
 
 // copyFile copies a single file

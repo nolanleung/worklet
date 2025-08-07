@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nolanleung/worklet/internal/docker"
+	"github.com/nolanleung/worklet/pkg/daemon"
 	"github.com/spf13/cobra"
 )
 
@@ -20,38 +20,59 @@ func runForks(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Get list of sessions from Docker API
-	sessions, err := docker.ListSessions(ctx)
+	// Connect to daemon to get fork information
+	socketPath := daemon.GetDefaultSocketPath()
+	client := daemon.NewClient(socketPath)
+	
+	// Check if daemon is running
+	if !daemon.IsDaemonRunning(socketPath) {
+		return fmt.Errorf("daemon is not running. Start it with: worklet daemon start")
+	}
+	
+	if err := client.Connect(); err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer client.Close()
+
+	// Get list of forks from daemon
+	forks, err := client.ListForks(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to list sessions: %w", err)
+		return fmt.Errorf("failed to list forks: %w", err)
 	}
 
-	if len(sessions) == 0 {
+	if len(forks) == 0 {
 		fmt.Println("No active sessions found")
 		return nil
 	}
 
-	// Display sessions with their DNS names
-	for i, session := range sessions {
+	// Display forks with their DNS names
+	for i, fork := range forks {
 		if i > 0 {
 			fmt.Println()
 		}
 
-		fmt.Printf("Session: %s\n", session.SessionID)
-		if session.ProjectName != "" && session.ProjectName != session.SessionID {
-			fmt.Printf("Project: %s\n", session.ProjectName)
+		fmt.Printf("Session: %s\n", fork.ForkID)
+		if fork.ProjectName != "" && fork.ProjectName != fork.ForkID {
+			fmt.Printf("Project: %s\n", fork.ProjectName)
 		}
-		fmt.Printf("Status: %s\n", session.Status)
-		fmt.Printf("Container: %s\n", session.ContainerID[:12])
+		if fork.ContainerID != "" {
+			fmt.Printf("Container: %s\n", fork.ContainerID[:12])
+		}
+		fmt.Printf("Status: running\n")
 
-		if len(session.Services) == 0 {
-			fmt.Println("  No services")
+		if len(fork.Services) == 0 {
+			fmt.Println("Services: none")
 		} else {
 			fmt.Println("Services:")
-			for _, svc := range session.Services {
-				// Generate DNS name
-				dnsName := docker.GetSessionDNSName(session, svc)
-				fmt.Printf("  - %-15s → %s\n", svc.Name, dnsName)
+			for _, svc := range fork.Services {
+				// Generate URL for the service
+				subdomain := svc.Subdomain
+				if subdomain == "" {
+					subdomain = svc.Name
+				}
+				url := fmt.Sprintf("http://%s.%s-%s.local.worklet.sh", 
+					subdomain, fork.ProjectName, fork.ForkID)
+				fmt.Printf("  - %-15s → %s (port %d)\n", svc.Name, url, svc.Port)
 			}
 		}
 	}

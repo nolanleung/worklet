@@ -1,6 +1,7 @@
 package worklet
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -10,10 +11,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
@@ -21,6 +25,7 @@ import (
 	"github.com/nolanleung/worklet/internal/config"
 	"github.com/nolanleung/worklet/internal/docker"
 	"github.com/nolanleung/worklet/internal/projects"
+	"github.com/nolanleung/worklet/pkg/daemon"
 	"github.com/nolanleung/worklet/pkg/terminal"
 	"github.com/spf13/cobra"
 )
@@ -50,7 +55,9 @@ Examples:
   worklet run npm test                              # Run npm test
   worklet run https://github.com/user/repo          # Clone and run a git repository
   worklet run github.com/user/repo                  # Clone and run (shortened format)
-  worklet run git@github.com:user/repo.git          # Clone and run (SSH format)`,
+  worklet run git@github.com:user/repo.git          # Clone and run (SSH format)
+  worklet run github.com/user/repo#branch           # Clone specific branch
+  worklet run github.com/user/repo@abc123def        # Clone specific commit`,
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Handle conflicting flags
@@ -65,8 +72,11 @@ Examples:
 
 		// Check if first argument is a git URL
 		if len(args) > 0 && isGitURL(args[0]) {
+			// Parse the URL and any reference
+			parsed := parseGitURLWithRef(args[0])
+			
 			// Extract repository name for temp directory
-			repoName := extractRepoNameFromURL(args[0])
+			repoName := extractRepoNameFromURL(parsed.URL)
 			
 			// Create temporary directory
 			tempDir, err := createTempDirectory(repoName)
@@ -74,8 +84,8 @@ Examples:
 				return fmt.Errorf("failed to create temporary directory: %w", err)
 			}
 
-			// Clone the repository
-			if err := cloneRepository(args[0], tempDir); err != nil {
+			// Clone the repository with optional reference
+			if err := cloneRepository(parsed.URL, tempDir, parsed.Ref); err != nil {
 				// Clean up on failure
 				cleanupTempDirectory(tempDir)
 				return fmt.Errorf("failed to clone repository: %w", err)
@@ -184,6 +194,16 @@ func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error 
 		}
 		manager.AddOrUpdate(dir, projectName)
 	}
+	
+	// Ensure daemon is running for nginx proxy support
+	socketPath := daemon.GetDefaultSocketPath()
+	if !daemon.IsDaemonRunning(socketPath) {
+		log.Println("Starting worklet daemon for nginx proxy support...")
+		if err := ensureDaemonRunning(); err != nil {
+			log.Printf("Warning: Failed to start daemon: %v", err)
+			// Don't fail the run command, just warn
+		}
+	}
 
 	// Get session ID from daemon or generate fallback
 	sessionID := getSessionID()
@@ -274,6 +294,9 @@ func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error 
 			manager.UpdateForkStatus(dir, sessionID, true)
 		}
 		
+		// Trigger daemon discovery for immediate nginx update
+		triggerDaemonDiscovery()
+		
 		fmt.Printf("Container started in background with ID: %s\n", containerID[:12])
 		fmt.Printf("Session ID: %s\n", sessionID)
 		if shouldStartTerminal {
@@ -285,6 +308,9 @@ func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error 
 	if err := docker.RunContainer(opts); err != nil {
 		return fmt.Errorf("failed to run container: %w", err)
 	}
+	
+	// Trigger daemon discovery for immediate nginx update
+	triggerDaemonDiscovery()
 
 	return nil
 }
@@ -405,8 +431,57 @@ func openBrowserURL(url string) error {
 	return exec.Command(cmd, args...).Start()
 }
 
+// gitURLRef represents a git URL with an optional branch or commit reference
+type gitURLRef struct {
+	URL string
+	Ref string // branch name or commit hash
+}
+
+// parseGitURLWithRef parses a git URL and extracts any branch or commit reference
+func parseGitURLWithRef(urlStr string) *gitURLRef {
+	result := &gitURLRef{}
+	
+	// Check for branch reference (# separator)
+	if idx := strings.LastIndex(urlStr, "#"); idx != -1 {
+		result.URL = urlStr[:idx]
+		result.Ref = urlStr[idx+1:]
+		return result
+	}
+	
+	// Check for commit reference (@ separator)
+	if idx := strings.LastIndex(urlStr, "@"); idx != -1 {
+		// Make sure it's not part of git@ SSH URL
+		if !strings.HasPrefix(urlStr, "git@") || strings.Count(urlStr[:idx], "@") > 0 {
+			result.URL = urlStr[:idx]
+			result.Ref = urlStr[idx+1:]
+			return result
+		}
+	}
+	
+	// No reference specified
+	result.URL = urlStr
+	return result
+}
+
+// isCommitHash checks if a string looks like a git commit hash
+func isCommitHash(ref string) bool {
+	// Git commit hashes are 40 characters hex, but we also accept short hashes (min 7 chars)
+	if len(ref) < 7 || len(ref) > 40 {
+		return false
+	}
+	// Check if it's all hex characters
+	if matched, _ := regexp.MatchString(`^[a-fA-F0-9]+$`, ref); matched {
+		return true
+	}
+	return false
+}
+
 // isGitURL checks if the given string is a git URL
 func isGitURL(arg string) bool {
+	// First parse out any reference
+	parsed := parseGitURLWithRef(arg)
+	urlToCheck := parsed.URL
+	
 	// Check for common git URL patterns
 	gitURLPatterns := []string{
 		`^https?://`,                            // HTTP(S) URLs
@@ -417,13 +492,13 @@ func isGitURL(arg string) bool {
 	}
 
 	for _, pattern := range gitURLPatterns {
-		if matched, _ := regexp.MatchString(pattern, arg); matched {
+		if matched, _ := regexp.MatchString(pattern, urlToCheck); matched {
 			return true
 		}
 	}
 
 	// Also check if it looks like a github/gitlab shorthand (e.g., "user/repo")
-	if matched, _ := regexp.MatchString(`^[\w-]+/[\w.-]+$`, arg); matched {
+	if matched, _ := regexp.MatchString(`^[\w-]+/[\w.-]+$`, urlToCheck); matched {
 		return true
 	}
 
@@ -458,17 +533,37 @@ func normalizeGitURL(urlStr string) string {
 	return urlStr
 }
 
-// cloneRepository clones a git repository to a target directory
-func cloneRepository(gitURL, targetDir string) error {
+// cloneRepository clones a git repository to a target directory with optional branch/commit
+func cloneRepository(gitURL, targetDir, ref string) error {
 	normalizedURL := normalizeGitURL(gitURL)
 	
-	fmt.Printf("Cloning repository from %s...\n", normalizedURL)
+	if ref != "" {
+		fmt.Printf("Cloning repository from %s (ref: %s)...\n", normalizedURL, ref)
+	} else {
+		fmt.Printf("Cloning repository from %s...\n", normalizedURL)
+	}
 
 	// Configure clone options
 	cloneOpts := &git.CloneOptions{
 		URL:      normalizedURL,
 		Progress: os.Stdout,
-		Depth:    1, // Shallow clone for faster cloning
+	}
+
+	// Handle branch vs commit reference
+	if ref != "" {
+		if isCommitHash(ref) {
+			// For commits, we need the full history
+			// Don't set Depth, clone all history
+			fmt.Println("Cloning full history to checkout specific commit...")
+		} else {
+			// For branches, set the reference name
+			cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(ref)
+			cloneOpts.SingleBranch = true
+			fmt.Printf("Cloning branch: %s\n", ref)
+		}
+	} else {
+		// Default shallow clone for faster cloning when no ref specified
+		cloneOpts.Depth = 1
 	}
 
 	// Try to determine and set up authentication
@@ -478,12 +573,41 @@ func cloneRepository(gitURL, targetDir string) error {
 	}
 
 	// Perform the clone
-	_, err = git.PlainClone(targetDir, false, cloneOpts)
+	repo, err := git.PlainClone(targetDir, false, cloneOpts)
 	if err != nil {
 		if err == transport.ErrAuthenticationRequired {
 			return fmt.Errorf("authentication required to clone repository. Please ensure you have proper credentials configured")
 		}
+		if err == plumbing.ErrReferenceNotFound {
+			return fmt.Errorf("branch '%s' not found in repository", ref)
+		}
 		return fmt.Errorf("failed to clone repository: %w", err)
+	}
+
+	// If a commit hash was specified, checkout that commit
+	if ref != "" && isCommitHash(ref) {
+		fmt.Printf("Checking out commit: %s\n", ref)
+		
+		worktree, err := repo.Worktree()
+		if err != nil {
+			return fmt.Errorf("failed to get worktree: %w", err)
+		}
+
+		// Try to resolve the commit hash (supports short hashes)
+		hash, err := repo.ResolveRevision(plumbing.Revision(ref))
+		if err != nil {
+			return fmt.Errorf("commit '%s' not found in repository: %w", ref, err)
+		}
+
+		// Checkout the specific commit
+		err = worktree.Checkout(&git.CheckoutOptions{
+			Hash: *hash,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to checkout commit %s: %w", ref, err)
+		}
+		
+		fmt.Printf("Checked out commit: %s\n", hash.String()[:7])
 	}
 
 	fmt.Println("Repository cloned successfully")
@@ -621,6 +745,189 @@ func cleanupTempDirectory(dir string) error {
 
 	fmt.Printf("Cleaning up temporary directory: %s\n", dir)
 	return os.RemoveAll(dir)
+}
+
+// ensureDaemonRunning starts the daemon if it's not already running
+func ensureDaemonRunning() error {
+	homeDir, _ := os.UserHomeDir()
+	workletDir := filepath.Join(homeDir, ".worklet")
+	pidFile := filepath.Join(workletDir, "daemon.pid")
+	lockFile := filepath.Join(workletDir, "daemon.lock")
+	socketPath := daemon.GetDefaultSocketPath()
+	
+	// Use a lock file to prevent concurrent daemon starts
+	lock, err := acquireLock(lockFile)
+	if err != nil {
+		// Another process is starting the daemon, wait a bit and check if it's running
+		time.Sleep(3 * time.Second)
+		if daemon.IsDaemonRunning(socketPath) {
+			return nil
+		}
+		return fmt.Errorf("failed to acquire daemon lock: %w", err)
+	}
+	defer releaseLock(lock)
+	
+	// Check if daemon is already running via PID file
+	if isValidDaemonPID(pidFile) {
+		// PID is valid, check if daemon is responding
+		if daemon.IsDaemonRunning(socketPath) {
+			return nil // Daemon is running properly
+		}
+		// PID exists but daemon not responding, clean up
+		cleanupStaleDaemon(pidFile, socketPath)
+	}
+	
+	// Get executable path
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	// Prepare log file
+	logDir := filepath.Join(workletDir, "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return fmt.Errorf("failed to create log directory: %w", err)
+	}
+
+	logFile := filepath.Join(logDir, "daemon.log")
+
+	// Start daemon process
+	cmd := exec.Command(exePath, "daemon", "start", "--foreground")
+
+	// Redirect output to log file
+	outFile, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %w", err)
+	}
+	defer outFile.Close()
+
+	cmd.Stdout = outFile
+	cmd.Stderr = outFile
+
+	// Start process in background
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start daemon process: %w", err)
+	}
+
+	// Save PID
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0644); err != nil {
+		// Try to kill the process if we can't save the PID
+		cmd.Process.Kill()
+		return fmt.Errorf("failed to save daemon PID: %w", err)
+	}
+
+	// Wait for daemon to be ready with retries
+	for i := 0; i < 5; i++ {
+		time.Sleep(time.Second)
+		if daemon.IsDaemonRunning(socketPath) {
+			return nil // Success
+		}
+	}
+
+	// Daemon failed to start properly
+	cmd.Process.Kill()
+	os.Remove(pidFile)
+	return fmt.Errorf("daemon failed to start after 5 seconds (check logs at %s)", logFile)
+}
+
+// isValidDaemonPID checks if the PID file contains a valid running process
+func isValidDaemonPID(pidFile string) bool {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return false
+	}
+	
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return false
+	}
+	
+	// Check if process exists by sending signal 0
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	
+	// On Unix, sending signal 0 checks if process exists
+	err = process.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+// cleanupStaleDaemon removes stale PID file and socket
+func cleanupStaleDaemon(pidFile, socketPath string) {
+	// Try to read and kill any stale process
+	if data, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+			if process, err := os.FindProcess(pid); err == nil {
+				process.Signal(syscall.SIGTERM)
+				time.Sleep(time.Second)
+				process.Signal(syscall.SIGKILL)
+			}
+		}
+	}
+	
+	// Remove stale files
+	os.Remove(pidFile)
+	os.Remove(socketPath)
+}
+
+// acquireLock attempts to acquire an exclusive lock on the lock file
+func acquireLock(lockFile string) (*os.File, error) {
+	// Create lock file with exclusive access
+	lock, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		if os.IsExist(err) {
+			// Lock file exists, check if it's stale (older than 10 seconds)
+			if info, err := os.Stat(lockFile); err == nil {
+				if time.Since(info.ModTime()) > 10*time.Second {
+					// Stale lock, remove it
+					os.Remove(lockFile)
+					// Try again
+					return os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+				}
+			}
+			return nil, fmt.Errorf("lock file exists, another process may be starting the daemon")
+		}
+		return nil, err
+	}
+	
+	// Write PID to lock file for debugging
+	lock.WriteString(fmt.Sprintf("%d\n", os.Getpid()))
+	return lock, nil
+}
+
+// releaseLock releases the lock file
+func releaseLock(lock *os.File) {
+	if lock != nil {
+		lockPath := lock.Name()
+		lock.Close()
+		os.Remove(lockPath)
+	}
+}
+
+// triggerDaemonDiscovery tells the daemon to discover containers immediately
+func triggerDaemonDiscovery() {
+	socketPath := daemon.GetDefaultSocketPath()
+	
+	// Check if daemon is running
+	if !daemon.IsDaemonRunning(socketPath) {
+		return // Daemon not running, skip
+	}
+	
+	// Create client and trigger discovery
+	client := daemon.NewClient(socketPath)
+	if err := client.Connect(); err != nil {
+		log.Printf("Warning: Failed to connect to daemon for discovery trigger: %v", err)
+		return
+	}
+	defer client.Close()
+	
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	if err := client.TriggerDiscovery(ctx); err != nil {
+		log.Printf("Warning: Failed to trigger daemon discovery: %v", err)
+	}
 }
 
 // extractRepoNameFromURL extracts repository name from git URL
