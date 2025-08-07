@@ -31,7 +31,7 @@ events {
 
 http {
     # Docker DNS resolver - use Docker's embedded DNS server
-    resolver 127.0.0.11 valid=30s ipv6=off;
+    resolver 127.0.0.11 valid=1s ipv6=off;
     resolver_timeout 5s;
 
     # Basic settings
@@ -82,6 +82,11 @@ http {
             # Disable buffering for streaming responses
             proxy_buffering off;
             proxy_cache off;
+            
+            # Buffer settings for dynamic resolution
+            proxy_buffer_size 4k;
+            proxy_buffers 8 4k;
+            proxy_busy_buffers_size 8k;
         }
     }
     {{end}}
