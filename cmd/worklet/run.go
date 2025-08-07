@@ -11,9 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/go-git/go-git/v5"
@@ -196,13 +194,8 @@ func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error 
 	}
 	
 	// Ensure daemon is running for nginx proxy support
-	socketPath := daemon.GetDefaultSocketPath()
-	if !daemon.IsDaemonRunning(socketPath) {
-		log.Println("Starting worklet daemon for nginx proxy support...")
-		if err := ensureDaemonRunning(); err != nil {
-			log.Printf("Warning: Failed to start daemon: %v", err)
-			// Don't fail the run command, just warn
-		}
+	if err := ensureDaemonRunning(); err != nil {
+		log.Printf("Warning: Failed to start daemon: %v", err)
 	}
 
 	// Get session ID from daemon or generate fallback
@@ -747,162 +740,23 @@ func cleanupTempDirectory(dir string) error {
 	return os.RemoveAll(dir)
 }
 
-// ensureDaemonRunning starts the daemon if it's not already running
+// ensureDaemonRunning ensures the daemon is running, starting it if necessary
 func ensureDaemonRunning() error {
-	homeDir, _ := os.UserHomeDir()
-	workletDir := filepath.Join(homeDir, ".worklet")
-	pidFile := filepath.Join(workletDir, "daemon.pid")
-	lockFile := filepath.Join(workletDir, "daemon.lock")
 	socketPath := daemon.GetDefaultSocketPath()
 	
-	// Use a lock file to prevent concurrent daemon starts
-	lock, err := acquireLock(lockFile)
-	if err != nil {
-		// Another process is starting the daemon, wait a bit and check if it's running
-		time.Sleep(3 * time.Second)
-		if daemon.IsDaemonRunning(socketPath) {
-			return nil
-		}
-		return fmt.Errorf("failed to acquire daemon lock: %w", err)
-	}
-	defer releaseLock(lock)
-	
-	// Check if daemon is already running via PID file
-	if isValidDaemonPID(pidFile) {
-		// PID is valid, check if daemon is responding
-		if daemon.IsDaemonRunning(socketPath) {
-			return nil // Daemon is running properly
-		}
-		// PID exists but daemon not responding, clean up
-		cleanupStaleDaemon(pidFile, socketPath)
+	// Check if daemon is already running
+	if daemon.IsDaemonRunning(socketPath) {
+		return nil
 	}
 	
-	// Get executable path
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to get executable path: %w", err)
-	}
-
-	// Prepare log file
-	logDir := filepath.Join(workletDir, "logs")
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return fmt.Errorf("failed to create log directory: %w", err)
-	}
-
-	logFile := filepath.Join(logDir, "daemon.log")
-
-	// Start daemon process
-	cmd := exec.Command(exePath, "daemon", "start", "--foreground")
-
-	// Redirect output to log file
-	outFile, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open log file: %w", err)
-	}
-	defer outFile.Close()
-
-	cmd.Stdout = outFile
-	cmd.Stderr = outFile
-
-	// Start process in background
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start daemon process: %w", err)
-	}
-
-	// Save PID
-	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0644); err != nil {
-		// Try to kill the process if we can't save the PID
-		cmd.Process.Kill()
-		return fmt.Errorf("failed to save daemon PID: %w", err)
-	}
-
-	// Wait for daemon to be ready with retries
-	for i := 0; i < 5; i++ {
-		time.Sleep(time.Second)
-		if daemon.IsDaemonRunning(socketPath) {
-			return nil // Success
-		}
-	}
-
-	// Daemon failed to start properly
-	cmd.Process.Kill()
-	os.Remove(pidFile)
-	return fmt.Errorf("daemon failed to start after 5 seconds (check logs at %s)", logFile)
-}
-
-// isValidDaemonPID checks if the PID file contains a valid running process
-func isValidDaemonPID(pidFile string) bool {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return false
+	// Start daemon in background
+	log.Println("Starting worklet daemon for nginx proxy support...")
+	if err := StartDaemonBackground(socketPath); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 	
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return false
-	}
-	
-	// Check if process exists by sending signal 0
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	
-	// On Unix, sending signal 0 checks if process exists
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
-}
-
-// cleanupStaleDaemon removes stale PID file and socket
-func cleanupStaleDaemon(pidFile, socketPath string) {
-	// Try to read and kill any stale process
-	if data, err := os.ReadFile(pidFile); err == nil {
-		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
-			if process, err := os.FindProcess(pid); err == nil {
-				process.Signal(syscall.SIGTERM)
-				time.Sleep(time.Second)
-				process.Signal(syscall.SIGKILL)
-			}
-		}
-	}
-	
-	// Remove stale files
-	os.Remove(pidFile)
-	os.Remove(socketPath)
-}
-
-// acquireLock attempts to acquire an exclusive lock on the lock file
-func acquireLock(lockFile string) (*os.File, error) {
-	// Create lock file with exclusive access
-	lock, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-	if err != nil {
-		if os.IsExist(err) {
-			// Lock file exists, check if it's stale (older than 10 seconds)
-			if info, err := os.Stat(lockFile); err == nil {
-				if time.Since(info.ModTime()) > 10*time.Second {
-					// Stale lock, remove it
-					os.Remove(lockFile)
-					// Try again
-					return os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-				}
-			}
-			return nil, fmt.Errorf("lock file exists, another process may be starting the daemon")
-		}
-		return nil, err
-	}
-	
-	// Write PID to lock file for debugging
-	lock.WriteString(fmt.Sprintf("%d\n", os.Getpid()))
-	return lock, nil
-}
-
-// releaseLock releases the lock file
-func releaseLock(lock *os.File) {
-	if lock != nil {
-		lockPath := lock.Name()
-		lock.Close()
-		os.Remove(lockPath)
-	}
+	log.Println("Worklet daemon started successfully")
+	return nil
 }
 
 // triggerDaemonDiscovery tells the daemon to discover containers immediately

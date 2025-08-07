@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -81,7 +82,7 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start daemon in background
-	return startDaemonBackground(socketPath)
+	return StartDaemonBackground(socketPath)
 }
 
 func runDaemonForeground(socketPath string) error {
@@ -103,7 +104,8 @@ func runDaemonForeground(socketPath string) error {
 	return d.Stop()
 }
 
-func startDaemonBackground(socketPath string) error {
+// StartDaemonBackground starts the daemon process in the background
+func StartDaemonBackground(socketPath string) error {
 	// Get executable path
 	exePath, err := os.Executable()
 	if err != nil {
@@ -173,7 +175,7 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read PID file: %w", err)
 	}
 
-	pid, err := strconv.Atoi(string(pidData))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
 	if err != nil {
 		return fmt.Errorf("invalid PID in file: %w", err)
 	}

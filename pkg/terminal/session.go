@@ -46,20 +46,13 @@ type SessionManager struct {
 	sessions      map[string]*Session // By session ID
 	forkSessions  map[string]*Session // By fork ID
 	mu            sync.RWMutex
-	cleanupTicker *time.Ticker
-	cleanupDone   chan bool
 }
 
 func NewSessionManager() *SessionManager {
 	sm := &SessionManager{
 		sessions:     make(map[string]*Session),
 		forkSessions: make(map[string]*Session),
-		cleanupDone:  make(chan bool),
 	}
-
-	// Start cleanup goroutine
-	sm.cleanupTicker = time.NewTicker(5 * time.Minute)
-	go sm.cleanupRoutine()
 
 	return sm
 }
@@ -363,43 +356,8 @@ func (s *Session) Close() {
 	}
 }
 
-func (sm *SessionManager) cleanupRoutine() {
-	for {
-		select {
-		case <-sm.cleanupTicker.C:
-			sm.cleanupInactiveSessions()
-		case <-sm.cleanupDone:
-			return
-		}
-	}
-}
-
-func (sm *SessionManager) cleanupInactiveSessions() {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	now := time.Now()
-	timeout := 30 * time.Minute // Sessions timeout after 30 minutes of inactivity
-
-	for id, session := range sm.sessions {
-		session.stateMu.RLock()
-		state := session.state
-		lastActivity := session.lastActivity
-		session.stateMu.RUnlock()
-
-		if state == SessionStateDetached && now.Sub(lastActivity) > timeout {
-			log.Printf("Cleaning up inactive session %s for fork %s", id, session.ForkID)
-			session.Close()
-			delete(sm.sessions, id)
-			delete(sm.forkSessions, session.ForkID)
-		}
-	}
-}
 
 func (sm *SessionManager) Stop() {
-	close(sm.cleanupDone)
-	sm.cleanupTicker.Stop()
-
 	// Close all sessions
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

@@ -3,10 +3,15 @@ package worklet
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/nolanleung/worklet/pkg/daemon"
 	"github.com/spf13/cobra"
+)
+
+var (
+	forksDebug bool
 )
 
 var forksCmd = &cobra.Command{
@@ -16,28 +21,75 @@ var forksCmd = &cobra.Command{
 	RunE:  runForks,
 }
 
+func init() {
+	forksCmd.Flags().BoolVar(&forksDebug, "debug", false, "Enable debug logging")
+}
+
 func runForks(cmd *cobra.Command, args []string) error {
+	startTime := time.Now()
+	
+	if forksDebug {
+		log.SetPrefix("[DEBUG] ")
+		log.Printf("Starting forks command at %v", startTime)
+	}
+	
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// Connect to daemon to get fork information
 	socketPath := daemon.GetDefaultSocketPath()
+	if forksDebug {
+		log.Printf("Using socket path: %s", socketPath)
+	}
+	
 	client := daemon.NewClient(socketPath)
 	
 	// Check if daemon is running
-	if !daemon.IsDaemonRunning(socketPath) {
+	if forksDebug {
+		log.Printf("Checking if daemon is running...")
+	}
+	
+	isDaemonRunning := daemon.IsDaemonRunning(socketPath)
+	if forksDebug {
+		log.Printf("Daemon running check completed: %v (took %v)", isDaemonRunning, time.Since(startTime))
+	}
+	
+	if !isDaemonRunning {
 		return fmt.Errorf("daemon is not running. Start it with: worklet daemon start")
 	}
 	
+	if forksDebug {
+		log.Printf("Connecting to daemon...")
+	}
+	
+	connectStart := time.Now()
 	if err := client.Connect(); err != nil {
+		if forksDebug {
+			log.Printf("Failed to connect after %v: %v", time.Since(connectStart), err)
+		}
 		return fmt.Errorf("failed to connect to daemon: %w", err)
 	}
 	defer client.Close()
+	
+	if forksDebug {
+		log.Printf("Connected successfully (took %v)", time.Since(connectStart))
+		log.Printf("Requesting fork list from daemon...")
+	}
 
 	// Get list of forks from daemon
+	listStart := time.Now()
 	forks, err := client.ListForks(ctx)
 	if err != nil {
+		if forksDebug {
+			log.Printf("Failed to list forks after %v: %v", time.Since(listStart), err)
+			log.Printf("Total time before failure: %v", time.Since(startTime))
+		}
 		return fmt.Errorf("failed to list forks: %w", err)
+	}
+	
+	if forksDebug {
+		log.Printf("Received %d forks from daemon (took %v)", len(forks), time.Since(listStart))
+		log.Printf("Total command execution time: %v", time.Since(startTime))
 	}
 
 	if len(forks) == 0 {
