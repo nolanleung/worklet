@@ -48,9 +48,9 @@ func RunContainer(opts RunOptions) (string, error) {
 		// In mount mode, use the configured image
 		imageName = opts.Config.Run.Image
 		if imageName == "" {
-			imageName = "docker:dind"
+			imageName = "worklet/base:latest"
 		}
-		
+
 		// Process environment templates for mount mode (write to host directory)
 		if err := processEnvironmentTemplates(opts.WorkDir, opts.WorkDir, opts); err != nil {
 			// Log warning but don't fail the container start
@@ -112,23 +112,23 @@ func RunContainer(opts RunOptions) (string, error) {
 
 		// Set isolation mode environment variable
 		args = append(args, "-e", "WORKLET_ISOLATION=full")
-		
+
 		// Set Docker environment variables for DinD
 		args = append(args, "-e", "DOCKER_TLS_CERTDIR=")
 		args = append(args, "-e", "DOCKER_DRIVER=overlay2")
-		
+
 		// Create and mount Docker storage volumes for caching only images (not container state)
 		// We mount specific subdirectories to avoid persisting container state which causes conflicts
 		dockerImageVolume := fmt.Sprintf("worklet-docker-images-%s", projectName)
 		dockerOverlayVolume := fmt.Sprintf("worklet-docker-overlay-%s", projectName)
-		
+
 		if err := ensureDockerVolumeExists(dockerImageVolume); err != nil {
 			return "", fmt.Errorf("failed to create Docker image volume: %w", err)
 		}
 		if err := ensureDockerVolumeExists(dockerOverlayVolume); err != nil {
 			return "", fmt.Errorf("failed to create Docker overlay volume: %w", err)
 		}
-		
+
 		// Mount only the image and overlay directories to cache layers but not container state
 		args = append(args, "-v", fmt.Sprintf("%s:/var/lib/docker/image", dockerImageVolume))
 		args = append(args, "-v", fmt.Sprintf("%s:/var/lib/docker/overlay2", dockerOverlayVolume))
@@ -175,7 +175,7 @@ func RunContainer(opts RunOptions) (string, error) {
 
 	// Add session ID environment variable
 	args = append(args, "-e", fmt.Sprintf("WORKLET_SESSION_ID=%s", opts.SessionID))
-	
+
 	// Add project name environment variable
 	args = append(args, "-e", fmt.Sprintf("WORKLET_PROJECT_NAME=%s", projectName))
 
@@ -217,7 +217,7 @@ func RunContainer(opts RunOptions) (string, error) {
 	for _, volume := range opts.Config.Run.Volumes {
 		args = append(args, "-v", volume)
 	}
-	
+
 	// Add pnpm store volume if this is a pnpm project
 	if _, err := os.Stat(filepath.Join(opts.WorkDir, "pnpm-lock.yaml")); err == nil {
 		pnpmStoreVolume := fmt.Sprintf("worklet-pnpm-store-%s", projectName)
@@ -265,7 +265,6 @@ func RunContainer(opts RunOptions) (string, error) {
 	return containerID, nil
 }
 
-
 // getEntrypointScriptPath extracts the embedded entrypoint script to a temp file
 func getEntrypointScriptPath() (string, error) {
 	// Create a temporary file for the script
@@ -308,7 +307,7 @@ func buildCopyImage(workDir string, cfg *config.WorkletConfig, sessionID string)
 	// Get base image
 	baseImage := cfg.Run.Image
 	if baseImage == "" {
-		baseImage = "docker:dind"
+		baseImage = "worklet/base:latest"
 	}
 
 	// Create temporary directory for build context
@@ -510,13 +509,13 @@ func ensureDockerVolumeExists(volumeName string) error {
 		// Volume already exists
 		return nil
 	}
-	
+
 	// Create the volume
 	cmd = exec.Command("docker", "volume", "create", volumeName)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to create Docker volume %s: %w", volumeName, err)
 	}
-	
+
 	return nil
 }
 

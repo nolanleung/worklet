@@ -81,7 +81,7 @@ Create a `.worklet.jsonc` file in your repository root:
 {
   "name": "my-project",     // Project name for container naming
   "run": {
-    "image": "docker:dind",          // Base Docker image (default: docker:dind)
+    "image": "worklet/base:latest",  // Base Docker image (default: worklet/base:latest)
     "privileged": true,              // Run with Docker-in-Docker
     "isolation": "full",             // "full" for DinD, "shared" for socket mount
     "command": ["/bin/sh"],          // Default command (optional)
@@ -229,14 +229,6 @@ The daemon:
 ```jsonc
 {
   "name": "microservices",
-  "run": {
-    "image": "docker:dind",
-    "isolation": "full",
-    "initScript": [
-      "apk add --no-cache docker-compose",
-      "docker-compose up -d"
-    ]
-  },
   "services": [
     {
       "name": "frontend",

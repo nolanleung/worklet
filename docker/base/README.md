@@ -47,7 +47,7 @@ worklet run
 
 ## What's Included
 
-- Docker-in-Docker functionality (from `docker:dind`)
+- Docker-in-Docker functionality
 - Essential build tools and utilities
 - Support for multiple package managers (npm, pnpm, bun)
 - Support for mounting Claude credentials when configured via `worklet link claude`
