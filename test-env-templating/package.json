@@ -1,0 +1,8 @@
+{
+  "name": "test-env-templating",
+  "version": "1.0.0",
+  "description": "Test environment templating",
+  "scripts": {
+    "start": "echo 'Test app started'"
+  }
+}

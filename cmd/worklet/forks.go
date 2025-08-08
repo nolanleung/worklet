@@ -44,20 +44,6 @@ func runForks(cmd *cobra.Command, args []string) error {
 	
 	client := daemon.NewClient(socketPath)
 	
-	// Check if daemon is running
-	if forksDebug {
-		log.Printf("Checking if daemon is running...")
-	}
-	
-	isDaemonRunning := daemon.IsDaemonRunning(socketPath)
-	if forksDebug {
-		log.Printf("Daemon running check completed: %v (took %v)", isDaemonRunning, time.Since(startTime))
-	}
-	
-	if !isDaemonRunning {
-		return fmt.Errorf("daemon is not running. Start it with: worklet daemon start")
-	}
-	
 	if forksDebug {
 		log.Printf("Connecting to daemon...")
 	}
@@ -67,7 +53,8 @@ func runForks(cmd *cobra.Command, args []string) error {
 		if forksDebug {
 			log.Printf("Failed to connect after %v: %v", time.Since(connectStart), err)
 		}
-		return fmt.Errorf("failed to connect to daemon: %w", err)
+		// If we can't connect, assume daemon is not running
+		return fmt.Errorf("daemon is not running. Start it with: worklet daemon start")
 	}
 	defer client.Close()
 	

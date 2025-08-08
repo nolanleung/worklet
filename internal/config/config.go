@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -58,10 +59,20 @@ func LoadConfig(dir string) (*WorkletConfig, error) {
 }
 
 // LoadConfigOrDetect loads config from .worklet.jsonc or detects project type
-func LoadConfigOrDetect(dir string) (*WorkletConfig, error) {
+func LoadConfigOrDetect(dir string, isClonedRepo bool) (*WorkletConfig, error) {
 	// First try to load existing config
 	config, err := LoadConfig(dir)
 	if err == nil {
+		// If it's a cloned repo and Claude is not enabled, enable it if credentials exist
+		if isClonedRepo && (config.Run.Credentials == nil || !config.Run.Credentials.Claude) {
+			// Check if Claude credentials are available
+			if hasClaudeCredentials() {
+				if config.Run.Credentials == nil {
+					config.Run.Credentials = &CredentialConfig{}
+				}
+				config.Run.Credentials.Claude = true
+			}
+		}
 		return config, nil
 	}
 
@@ -73,7 +84,7 @@ func LoadConfigOrDetect(dir string) (*WorkletConfig, error) {
 		}
 
 		// Generate default config based on detected type
-		defaultConfig, genErr := GenerateDefaultConfig(dir, projectType)
+		defaultConfig, genErr := GenerateDefaultConfig(dir, projectType, isClonedRepo)
 		if genErr != nil {
 			return nil, genErr
 		}
@@ -95,4 +106,13 @@ func LoadConfigOrDetect(dir string) (*WorkletConfig, error) {
 
 	// If it's another error, return it
 	return nil, err
+}
+
+// hasClaudeCredentials checks if Claude credentials are configured
+func hasClaudeCredentials() bool {
+	// Import cycle prevention - we'll check this differently
+	// For now, we'll use a simple volume check
+	cmd := exec.Command("docker", "volume", "inspect", "worklet-claude-credentials")
+	err := cmd.Run()
+	return err == nil
 }

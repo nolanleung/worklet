@@ -1,0 +1,20 @@
+{
+  "name": "testapp",
+  "run": {
+    "image": "node:18",
+    "command": ["sh", "-c", "cat .env && echo '---' && env | grep WORKLET_ | sort"],
+    "isolation": "shared"
+  },
+  "services": [
+    {
+      "name": "api",
+      "port": 3001,
+      "subdomain": "api"
+    },
+    {
+      "name": "web",
+      "port": 3000,
+      "subdomain": "app"
+    }
+  ]
+}

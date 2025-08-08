@@ -58,7 +58,7 @@ type InteractiveModel struct {
 	confirmMsg     string
 	confirmPath    string
 	action         string  // Track what action to perform after quit
-	showSessions   bool    // Show session selector for current project
+	showSessions   bool    // Show session list for current project (informational only)
 	sessionCursor  int     // Cursor position in session list
 }
 
@@ -160,18 +160,26 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				absPath, _ := filepath.Abs(project.Path)
 				sessions := m.projectSessions[absPath]
 				
-				// If sessions are expanded and we have sessions, attach to selected one
-				if m.showSessions && len(sessions) > 0 {
-					selectedSession := sessions[m.sessionCursor]
+				// If sessions exist, attach to the first one (or selected one if list is expanded)
+				if len(sessions) > 0 {
+					var selectedSession docker.SessionInfo
+					if m.showSessions {
+						// If session list is shown, use the selected session
+						selectedSession = sessions[m.sessionCursor]
+					} else {
+						// Otherwise, use the first session
+						selectedSession = sessions[0]
+					}
 					m.action = "attach:" + selectedSession.SessionID
 					m.quitting = true
 					return m, tea.Quit
 				} else {
-					// Otherwise start a new session in background mode
+					// No sessions exist, start a new one
 					return m, startProjectInBackground(m.projects[m.cursor].Path)
 				}
 			}
 
+		
 		case "a":
 			// Attach to running container
 			if len(m.projects) > 0 {
@@ -198,6 +206,12 @@ func (m InteractiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.showSessions = true
 					m.sessionCursor = 0
 				}
+			}
+		
+		case "n":
+			// Start new session
+			if len(m.projects) > 0 {
+				return m, startProjectInBackground(m.projects[m.cursor].Path)
 			}
 		
 		case "right", "l", "tab":
@@ -423,7 +437,7 @@ func (m InteractiveModel) View() string {
 		helpText := "↑/↓ Navigate • Enter: Attach • ← Collapse • q: Quit"
 		s.WriteString(helpStyle.Render(helpText))
 	} else {
-		helpText := "↑/↓ Navigate • Enter: Start new • a: Attach • d: Remove • r: Refresh • q: Quit"
+		helpText := "↑/↓ Navigate • Enter: Attach/Start • n: New session • d: Remove • r: Refresh • q: Quit"
 		s.WriteString(helpStyle.Render(helpText))
 		
 		// Additional tips based on current project state
@@ -434,10 +448,13 @@ func (m InteractiveModel) View() string {
 			
 			if len(sessions) == 1 {
 				s.WriteString("\n")
-				s.WriteString(helpStyle.Render("Press 'a' to attach to the running session"))
+				s.WriteString(helpStyle.Render("Press Enter or 'a' to attach to the running session"))
 			} else if len(sessions) > 1 {
 				s.WriteString("\n")
-				s.WriteString(helpStyle.Render(fmt.Sprintf("Press → to expand %d sessions • Press 'a' to attach", len(sessions))))
+				s.WriteString(helpStyle.Render(fmt.Sprintf("Press → to view %d sessions • Press 'a' to attach", len(sessions))))
+			} else {
+				s.WriteString("\n")
+				s.WriteString(helpStyle.Render("Press Enter or 'n' to start a new session"))
 			}
 		}
 	}

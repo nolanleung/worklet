@@ -35,12 +35,15 @@ var (
 	noTerminal      bool
 	openTerminal    bool
 	runTerminalPort int
+	linkClaude      bool
 )
 
 var runCmd = &cobra.Command{
 	Use:   "run [git-url|path] [command]",
-	Short: "Run a repository or git URL in a Docker container with Docker-in-Docker support",
-	Long: `Runs a repository in a Docker container with Docker-in-Docker capabilities based on .worklet.jsonc configuration.
+	Short: "Run a repository or git URL in a detached Docker container with Docker-in-Docker support",
+	Long: `Runs a repository in a detached Docker container with Docker-in-Docker capabilities based on .worklet.jsonc configuration.
+
+All worklet sessions run in the background (detached mode). You can access running sessions through the terminal server or by using docker exec directly.
 
 By default, worklet run creates a persistent isolated environment. Use --mount to run directly in the current directory, or --temp to create a temporary environment that auto-cleans up.
 
@@ -72,10 +75,10 @@ Examples:
 		if len(args) > 0 && isGitURL(args[0]) {
 			// Parse the URL and any reference
 			parsed := parseGitURLWithRef(args[0])
-			
+
 			// Extract repository name for temp directory
 			repoName := extractRepoNameFromURL(parsed.URL)
-			
+
 			// Create temporary directory
 			tempDir, err := createTempDirectory(repoName)
 			if err != nil {
@@ -120,8 +123,8 @@ Examples:
 			fmt.Println("Note: Using --mount with a git URL will preserve the cloned directory")
 		}
 
-		// Run in the determined directory
-		return RunInDirectory(workDir, cmdArgs...)
+		// Run in the determined directory with cloned repo flag
+		return runInDirectoryWithClonedFlag(workDir, isClonedRepo && linkClaude, cmdArgs...)
 	},
 }
 
@@ -132,16 +135,17 @@ func init() {
 	runCmd.Flags().BoolVar(&noTerminal, "no-terminal", false, "Disable terminal server")
 	runCmd.Flags().BoolVar(&openTerminal, "open-terminal", false, "Open terminal in browser automatically")
 	runCmd.Flags().IntVar(&runTerminalPort, "terminal-port", 8181, "Port for terminal server (default: 8181)")
+	runCmd.Flags().BoolVar(&linkClaude, "link-claude", true, "Automatically link Claude credentials for cloned repositories")
 }
 
-// RunInDirectory runs worklet in the specified directory
+// RunInDirectory runs worklet in the specified directory (always detached)
 func RunInDirectory(dir string, cmdArgs ...string) error {
-	return runInDirectoryWithMode(dir, false, cmdArgs...)
+	return runInDirectoryWithCloned(dir, false, cmdArgs...)
 }
 
-// RunInBackground runs worklet in the specified directory in detached mode
-func RunInBackground(dir string, cmdArgs ...string) error {
-	return runInDirectoryWithMode(dir, true, cmdArgs...)
+// runInDirectoryWithClonedFlag runs worklet with cloned repo flag (always detached)
+func runInDirectoryWithClonedFlag(dir string, isClonedRepo bool, cmdArgs ...string) error {
+	return runInDirectoryWithCloned(dir, isClonedRepo, cmdArgs...)
 }
 
 // AttachToContainer executes an interactive shell in an existing container for a session
@@ -152,41 +156,33 @@ func AttachToContainer(sessionID string) error {
 	if err != nil || len(output) == 0 {
 		return fmt.Errorf("no running container found for session %s", sessionID)
 	}
-	
+
 	containerID := strings.TrimSpace(string(output))
-	
+
 	// Get container name for display
 	nameCmd := exec.Command("docker", "inspect", "-f", "{{.Name}}", containerID)
 	nameOutput, _ := nameCmd.Output()
 	containerName := strings.TrimPrefix(strings.TrimSpace(string(nameOutput)), "/")
-	
+
 	// Execute an interactive shell using docker exec
-	cmd := exec.Command("docker", "exec", "-it", containerID, "/bin/bash")
+	cmd := exec.Command("docker", "exec", "-it", containerID, "/bin/sh")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	
-	fmt.Printf("Starting shell in container %s...\n", containerName)
-	
+
+	fmt.Printf("Attaching to container %s...\n", containerName)
+
 	if err := cmd.Run(); err != nil {
-		// If /bin/bash fails, try /bin/sh as fallback
-		cmd = exec.Command("docker", "exec", "-it", containerID, "/bin/sh")
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to execute shell in container: %w", err)
-		}
+		return fmt.Errorf("failed to execute shell in container: %w", err)
 	}
-	
+
 	return nil
 }
 
-// runInDirectoryWithMode runs worklet with specified attach mode
-func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error {
+// runInDirectoryWithCloned runs worklet with cloned repo flag (always detached)
+func runInDirectoryWithCloned(dir string, isClonedRepo bool, cmdArgs ...string) error {
 	// Load config or detect project type
-	cfg, err := config.LoadConfigOrDetect(dir)
+	cfg, err := config.LoadConfigOrDetect(dir, isClonedRepo)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -199,7 +195,7 @@ func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error 
 		}
 		manager.AddOrUpdate(dir, projectName)
 	}
-	
+
 	// Ensure daemon is running for nginx proxy support
 	if err := ensureDaemonRunning(); err != nil {
 		log.Printf("Warning: Failed to start daemon: %v", err)
@@ -224,7 +220,6 @@ func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error 
 	}
 
 	// Start docker-compose services if configured
-	composeStarted := false
 	composePath := getComposePath(dir, cfg)
 	if composePath != "" {
 		projectName := cfg.Name
@@ -235,7 +230,6 @@ func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error 
 		if err := docker.StartComposeServices(dir, composePath, sessionID, projectName, isolation); err != nil {
 			log.Printf("Warning: Failed to start compose services: %v", err)
 		} else {
-			composeStarted = true
 			if isolation == "full" {
 				fmt.Printf("Docker-compose services will be started inside the container from: %s\n", composePath)
 			} else {
@@ -245,34 +239,9 @@ func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error 
 	}
 
 	// Session discovery is now handled via Docker labels
-	// No need for separate daemon registration
+	// Sessions run detached, so no cleanup on exit needed
 
-	// For detached mode, we don't want to cleanup on exit
-	if !detached {
-		// Ensure cleanup on exit
-		defer func() {
-			// Session cleanup is handled via Docker container stop/remove
-
-			// Stop compose services if we started them
-			if composeStarted && composePath != "" {
-				projectName := cfg.Name
-				if projectName == "" {
-					projectName = "worklet"
-				}
-
-				if err := docker.StopComposeServices(dir, composePath, sessionID, projectName, isolation); err != nil {
-					log.Printf("Warning: Failed to stop compose services: %v", err)
-				}
-			}
-
-			// Clean up session network
-			if err := docker.RemoveSessionNetwork(sessionID); err != nil {
-				log.Printf("Warning: Failed to remove session network: %v", err)
-			}
-		}()
-	}
-
-	// Run in Docker
+	// Run in Docker (always detached)
 	opts := docker.RunOptions{
 		WorkDir:     dir,
 		Config:      cfg,
@@ -280,38 +249,26 @@ func runInDirectoryWithMode(dir string, detached bool, cmdArgs ...string) error 
 		MountMode:   mountMode,
 		ComposePath: composePath,
 		CmdArgs:     cmdArgs,
-		Detached:    detached,
 	}
-	
-	if detached {
-		containerID, err := docker.RunContainerDetached(opts)
-		if err != nil {
-			return fmt.Errorf("failed to run container: %w", err)
-		}
-		
-		// Update project manager with container ID
-		if manager, err := projects.NewManager(); err == nil {
-			manager.UpdateForkStatus(dir, sessionID, true)
-		}
-		
-		// Trigger daemon discovery for immediate nginx update
-		triggerDaemonDiscovery()
-		
-		fmt.Printf("Container started in background with ID: %s\n", containerID[:12])
-		fmt.Printf("Session ID: %s\n", sessionID)
-		if shouldStartTerminal {
-			fmt.Printf("Access terminal at: http://localhost:%d\n", runTerminalPort)
-		}
-		return nil
-	}
-	
-	if err := docker.RunContainer(opts); err != nil {
+
+	containerID, err := docker.RunContainer(opts)
+	if err != nil {
 		return fmt.Errorf("failed to run container: %w", err)
 	}
-	
+
+	// Update project manager with container ID
+	if manager, err := projects.NewManager(); err == nil {
+		manager.UpdateForkStatus(dir, sessionID, true)
+	}
+
 	// Trigger daemon discovery for immediate nginx update
 	triggerDaemonDiscovery()
 
+	fmt.Printf("Container started in background with ID: %s\n", containerID[:12])
+	fmt.Printf("Session ID: %s\n", sessionID)
+	if shouldStartTerminal {
+		fmt.Printf("Access terminal at: http://localhost:%d\n", runTerminalPort)
+	}
 	return nil
 }
 
@@ -440,14 +397,14 @@ type gitURLRef struct {
 // parseGitURLWithRef parses a git URL and extracts any branch or commit reference
 func parseGitURLWithRef(urlStr string) *gitURLRef {
 	result := &gitURLRef{}
-	
+
 	// Check for branch reference (# separator)
 	if idx := strings.LastIndex(urlStr, "#"); idx != -1 {
 		result.URL = urlStr[:idx]
 		result.Ref = urlStr[idx+1:]
 		return result
 	}
-	
+
 	// Check for commit reference (@ separator)
 	if idx := strings.LastIndex(urlStr, "@"); idx != -1 {
 		// Make sure it's not part of git@ SSH URL
@@ -457,7 +414,7 @@ func parseGitURLWithRef(urlStr string) *gitURLRef {
 			return result
 		}
 	}
-	
+
 	// No reference specified
 	result.URL = urlStr
 	return result
@@ -481,13 +438,13 @@ func isGitURL(arg string) bool {
 	// First parse out any reference
 	parsed := parseGitURLWithRef(arg)
 	urlToCheck := parsed.URL
-	
+
 	// Check for common git URL patterns
 	gitURLPatterns := []string{
-		`^https?://`,                            // HTTP(S) URLs
-		`^git@`,                                 // SSH URLs like git@github.com:user/repo.git
-		`^ssh://`,                               // SSH URLs
-		`^git://`,                               // Git protocol URLs
+		`^https?://`,                             // HTTP(S) URLs
+		`^git@`,                                  // SSH URLs like git@github.com:user/repo.git
+		`^ssh://`,                                // SSH URLs
+		`^git://`,                                // Git protocol URLs
 		`^(github\.com|gitlab\.com|bitbucket\.)`, // Common git hosting services without protocol
 	}
 
@@ -508,13 +465,13 @@ func isGitURL(arg string) bool {
 // normalizeGitURL converts various git URL formats to a standard format
 func normalizeGitURL(urlStr string) string {
 	// Handle shortened formats like "github.com/user/repo"
-	if !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") && 
-	   !strings.HasPrefix(urlStr, "git@") && !strings.HasPrefix(urlStr, "ssh://") && 
-	   !strings.HasPrefix(urlStr, "git://") {
+	if !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") &&
+		!strings.HasPrefix(urlStr, "git@") && !strings.HasPrefix(urlStr, "ssh://") &&
+		!strings.HasPrefix(urlStr, "git://") {
 		// Check if it's a github/gitlab/bitbucket shorthand
-		if strings.HasPrefix(urlStr, "github.com/") || 
-		   strings.HasPrefix(urlStr, "gitlab.com/") || 
-		   strings.HasPrefix(urlStr, "bitbucket.org/") {
+		if strings.HasPrefix(urlStr, "github.com/") ||
+			strings.HasPrefix(urlStr, "gitlab.com/") ||
+			strings.HasPrefix(urlStr, "bitbucket.org/") {
 			urlStr = "https://" + urlStr
 		} else if matched, _ := regexp.MatchString(`^[\w-]+/[\w.-]+$`, urlStr); matched {
 			// Assume GitHub for "user/repo" format
@@ -523,10 +480,10 @@ func normalizeGitURL(urlStr string) string {
 	}
 
 	// Ensure .git suffix for consistency
-	if !strings.HasSuffix(urlStr, ".git") && 
-	   (strings.Contains(urlStr, "github.com") || 
-	    strings.Contains(urlStr, "gitlab.com") || 
-	    strings.Contains(urlStr, "bitbucket.org")) {
+	if !strings.HasSuffix(urlStr, ".git") &&
+		(strings.Contains(urlStr, "github.com") ||
+			strings.Contains(urlStr, "gitlab.com") ||
+			strings.Contains(urlStr, "bitbucket.org")) {
 		urlStr += ".git"
 	}
 
@@ -536,7 +493,7 @@ func normalizeGitURL(urlStr string) string {
 // cloneRepository clones a git repository to a target directory with optional branch/commit
 func cloneRepository(gitURL, targetDir, ref string) error {
 	normalizedURL := normalizeGitURL(gitURL)
-	
+
 	if ref != "" {
 		fmt.Printf("Cloning repository from %s (ref: %s)...\n", normalizedURL, ref)
 	} else {
@@ -587,7 +544,7 @@ func cloneRepository(gitURL, targetDir, ref string) error {
 	// If a commit hash was specified, checkout that commit
 	if ref != "" && isCommitHash(ref) {
 		fmt.Printf("Checking out commit: %s\n", ref)
-		
+
 		worktree, err := repo.Worktree()
 		if err != nil {
 			return fmt.Errorf("failed to get worktree: %w", err)
@@ -606,7 +563,7 @@ func cloneRepository(gitURL, targetDir, ref string) error {
 		if err != nil {
 			return fmt.Errorf("failed to checkout commit %s: %w", ref, err)
 		}
-		
+
 		fmt.Printf("Checked out commit: %s\n", hash.String()[:7])
 	}
 
@@ -750,18 +707,18 @@ func cleanupTempDirectory(dir string) error {
 // ensureDaemonRunning ensures the daemon is running, starting it if necessary
 func ensureDaemonRunning() error {
 	socketPath := daemon.GetDefaultSocketPath()
-	
+
 	// Check if daemon is already running
 	if daemon.IsDaemonRunning(socketPath) {
 		return nil
 	}
-	
+
 	// Start daemon in background
 	log.Println("Starting worklet daemon for nginx proxy support...")
 	if err := StartDaemonBackground(socketPath); err != nil {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
-	
+
 	log.Println("Worklet daemon started successfully")
 	return nil
 }
@@ -769,12 +726,12 @@ func ensureDaemonRunning() error {
 // triggerDaemonDiscovery tells the daemon to discover containers immediately
 func triggerDaemonDiscovery() {
 	socketPath := daemon.GetDefaultSocketPath()
-	
+
 	// Check if daemon is running
 	if !daemon.IsDaemonRunning(socketPath) {
 		return // Daemon not running, skip
 	}
-	
+
 	// Create client and trigger discovery
 	client := daemon.NewClient(socketPath)
 	if err := client.Connect(); err != nil {
@@ -782,10 +739,10 @@ func triggerDaemonDiscovery() {
 		return
 	}
 	defer client.Close()
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	
+
 	if err := client.TriggerDiscovery(ctx); err != nil {
 		log.Printf("Warning: Failed to trigger daemon discovery: %v", err)
 	}
@@ -795,7 +752,7 @@ func triggerDaemonDiscovery() {
 func extractRepoNameFromURL(gitURL string) string {
 	// Normalize the URL first
 	normalizedURL := normalizeGitURL(gitURL)
-	
+
 	// Try to parse as URL
 	u, err := url.Parse(normalizedURL)
 	if err == nil && u.Path != "" {

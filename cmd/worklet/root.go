@@ -40,17 +40,17 @@ var rootCmd = &cobra.Command{
 			if err := os.Chdir(selectedPath); err != nil {
 				return fmt.Errorf("failed to change directory: %w", err)
 			}
-			// Start in background
-			return RunInBackground(selectedPath)
+			// Start in background (all sessions are now detached)
+			return RunInDirectory(selectedPath)
 		case "attach":
-			// selectedPath contains the fork ID for attach action
+			// selectedPath contains the session ID for attach action
 			return AttachToContainer(selectedPath)
 		default:
 			// Change to the selected directory
 			if err := os.Chdir(selectedPath); err != nil {
 				return fmt.Errorf("failed to change directory: %w", err)
 			}
-			// Normal interactive run
+			// Start new session (always detached)
 			return RunInDirectory(selectedPath)
 		}
 	},

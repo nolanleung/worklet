@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/nolanleung/worklet/internal/config"
+	"github.com/nolanleung/worklet/internal/env"
 )
 
 //go:embed dind-entrypoint.sh
@@ -24,30 +25,31 @@ type RunOptions struct {
 	MountMode   bool
 	ComposePath string // Resolved compose path
 	CmdArgs     []string
-	Detached    bool   // Run container in detached mode
 }
 
-func RunContainer(opts RunOptions) error {
+// RunContainer runs a container in detached mode and returns the container ID
+func RunContainer(opts RunOptions) (string, error) {
 	var imageName string
 	var err error
 
+	// Process environment templates before container start
+	if err := processEnvironmentTemplates(opts); err != nil {
+		// Log warning but don't fail the container start
+		fmt.Printf("Warning: Failed to process environment templates: %v\n", err)
+	}
+
 	// Ensure session-specific Docker network exists before running container
 	if err := EnsureSessionNetworkExists(opts.SessionID); err != nil {
-		return fmt.Errorf("failed to ensure session Docker network exists: %w", err)
+		return "", fmt.Errorf("failed to ensure session Docker network exists: %w", err)
 	}
 
 	// In copy mode, build a temporary image with the workspace files
 	if !opts.MountMode {
 		imageName, err = buildCopyImage(opts.WorkDir, opts.Config, opts.SessionID)
 		if err != nil {
-			return fmt.Errorf("failed to build copy image: %w", err)
+			return "", fmt.Errorf("failed to build copy image: %w", err)
 		}
-		// Ensure cleanup of temporary image
-		defer func() {
-			if removeErr := removeImage(imageName); removeErr != nil {
-				fmt.Printf("Warning: Failed to remove temporary image %s: %v\n", imageName, removeErr)
-			}
-		}()
+		// Note: We don't clean up the image here since container will be running
 	} else {
 		// In mount mode, use the configured image
 		imageName = opts.Config.Run.Image
@@ -56,12 +58,8 @@ func RunContainer(opts RunOptions) error {
 		}
 	}
 
-	// Build docker run command
-	// Don't use --rm to allow detach/reattach workflow
-	args := []string{"run", "-it"}
-	
-	// Add detach keys for interactive mode to allow Ctrl+P, Ctrl+Q
-	args = append(args, "--detach-keys", "ctrl-p,ctrl-q")
+	// Build docker run command for detached mode
+	args := []string{"run", "-d"}
 
 	// Add container name using project name and session ID
 	projectName := opts.Config.Name
@@ -91,7 +89,7 @@ func RunContainer(opts RunOptions) error {
 	if opts.MountMode {
 		absWorkDir, err := filepath.Abs(opts.WorkDir)
 		if err != nil {
-			return fmt.Errorf("failed to get absolute path: %w", err)
+			return "", fmt.Errorf("failed to get absolute path: %w", err)
 		}
 		args = append(args, "-v", fmt.Sprintf("%s:/workspace", absWorkDir))
 	}
@@ -121,10 +119,10 @@ func RunContainer(opts RunOptions) error {
 		dockerOverlayVolume := fmt.Sprintf("worklet-docker-overlay-%s", projectName)
 		
 		if err := ensureDockerVolumeExists(dockerImageVolume); err != nil {
-			return fmt.Errorf("failed to create Docker image volume: %w", err)
+			return "", fmt.Errorf("failed to create Docker image volume: %w", err)
 		}
 		if err := ensureDockerVolumeExists(dockerOverlayVolume); err != nil {
-			return fmt.Errorf("failed to create Docker overlay volume: %w", err)
+			return "", fmt.Errorf("failed to create Docker overlay volume: %w", err)
 		}
 		
 		// Mount only the image and overlay directories to cache layers but not container state
@@ -134,7 +132,7 @@ func RunContainer(opts RunOptions) error {
 		// Mount the entrypoint script
 		scriptPath, err := getEntrypointScriptPath()
 		if err != nil {
-			return fmt.Errorf("failed to get entrypoint script path: %w", err)
+			return "", fmt.Errorf("failed to get entrypoint script path: %w", err)
 		}
 		// Ensure cleanup of temp script file
 		defer os.Remove(scriptPath)
@@ -154,11 +152,17 @@ func RunContainer(opts RunOptions) error {
 		}
 
 	default:
-		return fmt.Errorf("invalid isolation mode: %s (must be 'full' or 'shared')", isolation)
+		return "", fmt.Errorf("invalid isolation mode: %s (must be 'full' or 'shared')", isolation)
 	}
 
 	// Add environment variables
 	for key, value := range opts.Config.Run.Environment {
+		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
+	}
+
+	// Add service environment variables from templating
+	serviceEnvVars := getServiceEnvironmentVariables(opts.Config, opts.SessionID)
+	for key, value := range serviceEnvVars {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
 	}
 
@@ -214,7 +218,7 @@ func RunContainer(opts RunOptions) error {
 	if _, err := os.Stat(filepath.Join(opts.WorkDir, "pnpm-lock.yaml")); err == nil {
 		pnpmStoreVolume := fmt.Sprintf("worklet-pnpm-store-%s", projectName)
 		if err := ensureDockerVolumeExists(pnpmStoreVolume); err != nil {
-			return fmt.Errorf("failed to create pnpm store volume: %w", err)
+			return "", fmt.Errorf("failed to create pnpm store volume: %w", err)
 		}
 		args = append(args, "-v", fmt.Sprintf("%s:/pnpm/store", pnpmStoreVolume))
 	}
@@ -228,246 +232,35 @@ func RunContainer(opts RunOptions) error {
 	// Add image (use temporary image in copy mode, configured image in mount mode)
 	args = append(args, imageName)
 
-	// Add command
-	if len(opts.CmdArgs) > 0 {
-		// Use provided command arguments
-		args = append(args, opts.CmdArgs...)
-	} else if len(opts.Config.Run.Command) > 0 {
-		// Fall back to config command
-		args = append(args, opts.Config.Run.Command...)
-	} else {
-		// Default to shell
-		args = append(args, "sh")
-	}
-
-	// Execute docker command
-	cmd := exec.Command("docker", args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	fmt.Printf("Running: docker %s\n", strings.Join(args, " "))
-
-	// Run the container
-	err = cmd.Run()
-
-	if err != nil {
-		return fmt.Errorf("docker command failed: %w", err)
-	}
-
-	return nil
-}
-
-// RunContainerDetached runs a container in detached mode and returns the container ID
-func RunContainerDetached(opts RunOptions) (string, error) {
-	var imageName string
-	var err error
-
-	// Ensure session-specific Docker network exists before running container
-	if err := EnsureSessionNetworkExists(opts.SessionID); err != nil {
-		return "", fmt.Errorf("failed to ensure session Docker network exists: %w", err)
-	}
-
-	// In copy mode, build a temporary image with the workspace files
-	if !opts.MountMode {
-		imageName, err = buildCopyImage(opts.WorkDir, opts.Config, opts.SessionID)
-		if err != nil {
-			return "", fmt.Errorf("failed to build copy image: %w", err)
-		}
-		// Note: We don't clean up the image here since container will be running
-	} else {
-		// In mount mode, use the configured image
-		imageName = opts.Config.Run.Image
-		if imageName == "" {
-			imageName = "docker:dind"
-		}
-	}
-
-	// Build docker run command
-	// Note: Don't use --rm for detached containers as we want them to persist
-	args := []string{"run", "-d"} // Use -d for detached mode
-
-	// Add container name using project name and session ID
-	projectName := opts.Config.Name
-	if projectName == "" {
-		projectName = "worklet"
-	}
-	containerName := fmt.Sprintf("%s-%s", projectName, opts.SessionID)
-	args = append(args, "--name", containerName)
-
-	// Add to session-specific worklet network for container-to-container communication
-	networkName := GetSessionNetworkName(opts.SessionID)
-	args = append(args, "--network", networkName)
-
-	// Add worklet labels for terminal discovery
-	args = append(args, "--label", "worklet.session=true")
-	args = append(args, "--label", fmt.Sprintf("worklet.session.id=%s", opts.SessionID))
-	args = append(args, "--label", fmt.Sprintf("worklet.project.name=%s", projectName))
-	args = append(args, "--label", fmt.Sprintf("worklet.workdir=%s", opts.WorkDir))
-
-	// Add service labels for discovery
-	for _, svc := range opts.Config.Services {
-		args = append(args, "--label", fmt.Sprintf("worklet.service.%s.port=%d", svc.Name, svc.Port))
-		args = append(args, "--label", fmt.Sprintf("worklet.service.%s.subdomain=%s", svc.Name, svc.Subdomain))
-	}
-
-	// In mount mode, add volume mount
-	if opts.MountMode {
-		absWorkDir, err := filepath.Abs(opts.WorkDir)
-		if err != nil {
-			return "", fmt.Errorf("failed to get absolute path: %w", err)
-		}
-		args = append(args, "-v", fmt.Sprintf("%s:/workspace", absWorkDir))
-	}
-
-	// Always set working directory
-	args = append(args, "-w", "/workspace")
-
-	// Determine isolation mode (default to "full" if not specified)
-	isolation := opts.Config.Run.Isolation
-	if isolation == "" {
-		isolation = "full"
-	}
-
-	// Configure based on isolation mode
-	switch isolation {
-	case "full":
-		// Full isolation with Docker-in-Docker
-		args = append(args, "--privileged")
-		args = append(args, "-e", "WORKLET_ISOLATION=full")
-		
-		// Create and mount Docker storage volumes for caching only images (not container state)
-		// We mount specific subdirectories to avoid persisting container state which causes conflicts
-		dockerImageVolume := fmt.Sprintf("worklet-docker-images-%s", projectName)
-		dockerOverlayVolume := fmt.Sprintf("worklet-docker-overlay-%s", projectName)
-		
-		if err := ensureDockerVolumeExists(dockerImageVolume); err != nil {
-			return "", fmt.Errorf("failed to create Docker image volume: %w", err)
-		}
-		if err := ensureDockerVolumeExists(dockerOverlayVolume); err != nil {
-			return "", fmt.Errorf("failed to create Docker overlay volume: %w", err)
-		}
-		
-		// Mount only the image and overlay directories to cache layers but not container state
-		args = append(args, "-v", fmt.Sprintf("%s:/var/lib/docker/image", dockerImageVolume))
-		args = append(args, "-v", fmt.Sprintf("%s:/var/lib/docker/overlay2", dockerOverlayVolume))
-
-		// Mount the entrypoint script
-		scriptPath, err := getEntrypointScriptPath()
-		if err != nil {
-			return "", fmt.Errorf("failed to get entrypoint script path: %w", err)
-		}
-		// Note: We don't remove the script immediately since container needs it
-		// TODO: Clean up script files periodically
-		
-		args = append(args, "-v", fmt.Sprintf("%s:/entrypoint.sh:ro", scriptPath))
-		args = append(args, "--entrypoint", "/entrypoint.sh")
-
-	case "shared":
-		// Shared Docker daemon via socket mount
-		args = append(args, "-v", "/var/run/docker.sock:/var/run/docker.sock")
-
-		// Add privileged flag if specified
-		if opts.Config.Run.Privileged {
-			args = append(args, "--privileged")
-		}
-
-	default:
-		return "", fmt.Errorf("invalid isolation mode: %s (must be 'full' or 'shared')", isolation)
-	}
-
-	// Add environment variables
-	for key, value := range opts.Config.Run.Environment {
-		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
-	}
-
-	// Disable Corepack prompts for Node.js projects
-	args = append(args, "-e", "COREPACK_ENABLE_DOWNLOAD_PROMPT=0")
-
-	// Add session ID environment variable
-	args = append(args, "-e", fmt.Sprintf("WORKLET_SESSION_ID=%s", opts.SessionID))
-	
-	// Add project name environment variable
-	args = append(args, "-e", fmt.Sprintf("WORKLET_PROJECT_NAME=%s", projectName))
-
-	// Mount compose file if configured and in full isolation mode
-	if opts.ComposePath != "" && isolation == "full" {
-		if _, err := os.Stat(opts.ComposePath); err == nil {
-			args = append(args, "-v", fmt.Sprintf("%s:/workspace/docker-compose.yml:ro", opts.ComposePath))
-			args = append(args, "-e", "WORKLET_COMPOSE_FILE=/workspace/docker-compose.yml")
-		}
-	}
-
-	// Build init script
-	var initScripts []string
-
-	// Add user-provided init script
-	if len(opts.Config.Run.InitScript) > 0 {
-		initScripts = append(initScripts, opts.Config.Run.InitScript...)
-	}
-
-	// Add credential init script if needed
-	if opts.Config.Run.Credentials != nil && opts.Config.Run.Credentials.Claude {
-		if credInitScript := GetCredentialInitScript(true); credInitScript != "" {
-			initScripts = append([]string{credInitScript}, initScripts...)
-		}
-	}
-
-	// Set combined init script if we have any
-	if len(initScripts) > 0 {
-		initScript := strings.Join(initScripts, " && ")
-		args = append(args, "-e", fmt.Sprintf("WORKLET_INIT_SCRIPT=%s", initScript))
-	}
-
-	// Add additional volumes
-	for _, volume := range opts.Config.Run.Volumes {
-		args = append(args, "-v", volume)
-	}
-	
-	// Add pnpm store volume if this is a pnpm project
-	if _, err := os.Stat(filepath.Join(opts.WorkDir, "pnpm-lock.yaml")); err == nil {
-		pnpmStoreVolume := fmt.Sprintf("worklet-pnpm-store-%s", projectName)
-		if err := ensureDockerVolumeExists(pnpmStoreVolume); err != nil {
-			return "", fmt.Errorf("failed to create pnpm store volume: %w", err)
-		}
-		args = append(args, "-v", fmt.Sprintf("%s:/pnpm/store", pnpmStoreVolume))
-	}
-
-	// Add credential volumes if configured
-	if opts.Config.Run.Credentials != nil && opts.Config.Run.Credentials.Claude {
-		credentialMounts := GetCredentialVolumeMounts(true)
-		args = append(args, credentialMounts...)
-	}
-
-	// Add image
-	args = append(args, imageName)
-
 	// For detached mode, use a long-running command if no command specified
 	if len(opts.CmdArgs) > 0 {
 		args = append(args, opts.CmdArgs...)
 	} else if len(opts.Config.Run.Command) > 0 {
 		args = append(args, opts.Config.Run.Command...)
 	} else {
-		// Use tail -f /dev/null to keep container running
-		args = append(args, "tail", "-f", "/dev/null")
+		// Default to sleep for detached containers
+		args = append(args, "sleep", "infinity")
 	}
 
-	// Execute docker command
+	// Execute docker command and capture output to get container ID
 	cmd := exec.Command("docker", args...)
-	
-	fmt.Printf("Starting container in background...\n")
-
-	// Run the container and capture output
-	output, err := cmd.CombinedOutput()
+	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("docker command failed: %w\nOutput: %s", err, output)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("docker command failed: %w\nStderr: %s", err, exitErr.Stderr)
+		}
+		return "", fmt.Errorf("docker command failed: %w", err)
 	}
 
 	// Extract container ID from output
 	containerID := strings.TrimSpace(string(output))
-	
+	if containerID == "" {
+		return "", fmt.Errorf("failed to get container ID from docker run output")
+	}
+
 	return containerID, nil
 }
+
 
 // getEntrypointScriptPath extracts the embedded entrypoint script to a temp file
 func getEntrypointScriptPath() (string, error) {
@@ -613,7 +406,7 @@ func copyWorkspace(src, dst string, excludePatterns []string) error {
 		// Convert path to components for matcher
 		pathComponents := strings.Split(relPath, string(filepath.Separator))
 
-		// Check if path should be excluded
+		// Check if path should be excluded BEFORE following symlinks
 		if matcher.Match(pathComponents, info.IsDir()) {
 			if info.IsDir() {
 				return filepath.SkipDir
@@ -621,10 +414,70 @@ func copyWorkspace(src, dst string, excludePatterns []string) error {
 			return nil
 		}
 
+		// Check if this is a symlink
+		linkInfo, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+
 		// Construct destination path
 		dstPath := filepath.Join(dst, relPath)
 
-		// Create directory or copy file
+		// Handle symlinks specially
+		if linkInfo.Mode()&os.ModeSymlink != 0 {
+			// Read the symlink target
+			target, err := os.Readlink(path)
+			if err != nil {
+				// If we can't read the symlink, skip it
+				fmt.Printf("Warning: Skipping unreadable symlink: %s\n", relPath)
+				return nil
+			}
+
+			// Resolve the absolute path of the target
+			absoluteTarget := target
+			if !filepath.IsAbs(target) {
+				absoluteTarget = filepath.Join(filepath.Dir(path), target)
+			}
+
+			// Check if the target is within the source directory
+			absTarget, err := filepath.Abs(absoluteTarget)
+			if err != nil {
+				// Skip symlinks we can't resolve
+				fmt.Printf("Warning: Skipping unresolvable symlink: %s\n", relPath)
+				return nil
+			}
+
+			absSrc, err := filepath.Abs(src)
+			if err != nil {
+				return err
+			}
+
+			// If the symlink points outside the workspace, skip it
+			if !strings.HasPrefix(absTarget, absSrc) {
+				fmt.Printf("Info: Skipping symlink pointing outside workspace: %s -> %s\n", relPath, target)
+				return nil
+			}
+
+			// For symlinks pointing inside the workspace, copy as regular files/directories
+			// This handles the case where symlinks point to already copied content
+			targetInfo, err := os.Stat(path)
+			if err != nil {
+				// If we can't stat the target, skip the symlink
+				fmt.Printf("Warning: Skipping broken symlink: %s\n", relPath)
+				return nil
+			}
+
+			if targetInfo.IsDir() {
+				// For directory symlinks, create the directory but don't recurse
+				// The actual content will be copied when we walk to the real directory
+				return os.MkdirAll(dstPath, targetInfo.Mode())
+			}
+
+			// For file symlinks, copy the file content
+			return copyFile(path, dstPath)
+		}
+
+		// Handle regular files and directories
 		if info.IsDir() {
 			return os.MkdirAll(dstPath, info.Mode())
 		}
@@ -678,4 +531,55 @@ func copyFile(src, dst string) error {
 	}
 
 	return os.Chmod(dst, sourceInfo.Mode())
+}
+
+// processEnvironmentTemplates processes .env.example files with templating
+func processEnvironmentTemplates(opts RunOptions) error {
+	// Only process templates if we have services defined
+	if len(opts.Config.Services) == 0 {
+		return nil
+	}
+
+	// Get project name
+	projectName := opts.Config.Name
+	if projectName == "" {
+		projectName = "worklet"
+	}
+
+	// Process env files with templating
+	return config.ProcessEnvFilesWithTemplating(
+		opts.WorkDir,
+		opts.SessionID,
+		projectName,
+		opts.Config.Services,
+	)
+}
+
+// getServiceEnvironmentVariables generates environment variables for services
+func getServiceEnvironmentVariables(cfg *config.WorkletConfig, sessionID string) map[string]string {
+	// Convert ServiceConfig to env.ServiceInfo
+	var serviceInfos []env.ServiceInfo
+	for _, svc := range cfg.Services {
+		serviceInfos = append(serviceInfos, env.ServiceInfo{
+			Name:      svc.Name,
+			Port:      svc.Port,
+			Subdomain: svc.Subdomain,
+		})
+	}
+
+	// Get project name
+	projectName := cfg.Name
+	if projectName == "" {
+		projectName = "worklet"
+	}
+
+	// Create template context
+	ctx := env.TemplateContext{
+		SessionID:   sessionID,
+		ProjectName: projectName,
+		Services:    serviceInfos,
+	}
+
+	// Get service environment variables
+	return env.GetServiceEnvironmentVariables(ctx)
 }

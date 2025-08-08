@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/nolanleung/worklet/internal/env"
 )
 
 // ProjectType represents the detected project type
@@ -202,8 +204,74 @@ func DetectEnvExampleFiles(dir string) ([]string, error) {
 	return envFiles, nil
 }
 
+// ProcessEnvFilesWithTemplating processes .env.example files and applies templating
+func ProcessEnvFilesWithTemplating(dir string, sessionID string, projectName string, services []ServiceConfig) error {
+	// Find all .env.example files
+	envExampleFiles, err := DetectEnvExampleFiles(dir)
+	if err != nil {
+		return err
+	}
+
+	// Convert ServiceConfig to env.ServiceInfo
+	var serviceInfos []env.ServiceInfo
+	for _, svc := range services {
+		serviceInfos = append(serviceInfos, env.ServiceInfo{
+			Name:      svc.Name,
+			Port:      svc.Port,
+			Subdomain: svc.Subdomain,
+		})
+	}
+
+	// Create template context
+	ctx := env.TemplateContext{
+		SessionID:   sessionID,
+		ProjectName: projectName,
+		Services:    serviceInfos,
+	}
+
+	// Process each .env.example file
+	for _, exampleFile := range envExampleFiles {
+		// Read the example file
+		examplePath := filepath.Join(dir, exampleFile)
+		content, err := os.ReadFile(examplePath)
+		if err != nil {
+			continue // Skip if can't read
+		}
+
+		// Get the target .env file path
+		var targetFile string
+		if strings.HasSuffix(exampleFile, ".example") {
+			targetFile = strings.TrimSuffix(exampleFile, ".example")
+		} else if strings.HasSuffix(exampleFile, ".sample") {
+			targetFile = strings.TrimSuffix(exampleFile, ".sample")
+		} else if strings.HasSuffix(exampleFile, ".template") {
+			targetFile = strings.TrimSuffix(exampleFile, ".template")
+		} else {
+			continue
+		}
+
+		targetPath := filepath.Join(dir, targetFile)
+
+		// Check if target already exists
+		if _, err := os.Stat(targetPath); err == nil {
+			// Target exists, skip
+			continue
+		}
+
+		// Process template
+		processedContent := env.ProcessTemplate(string(content), ctx)
+
+		// Write processed content to target file
+		if err := os.WriteFile(targetPath, []byte(processedContent), 0644); err != nil {
+			return fmt.Errorf("failed to write %s: %w", targetFile, err)
+		}
+	}
+
+	return nil
+}
+
 // GenerateDefaultConfig generates a default config based on detected project type
-func GenerateDefaultConfig(dir string, projectType ProjectType) (*WorkletConfig, error) {
+func GenerateDefaultConfig(dir string, projectType ProjectType, isClonedRepo bool) (*WorkletConfig, error) {
 	projectName := filepath.Base(dir)
 
 	switch projectType {
@@ -224,7 +292,8 @@ func GenerateDefaultConfig(dir string, projectType ProjectType) (*WorkletConfig,
 		// Build init script with install command
 		var initScript []string
 		
-		// Detect and copy .env.example files
+		// Detect and process .env.example files with templating
+		// Note: This creates a basic copy command, actual templating happens at runtime
 		envExampleFiles, _ := DetectEnvExampleFiles(dir)
 		for _, exampleFile := range envExampleFiles {
 			// Get the target .env file path by removing the .example/.sample/.template suffix
@@ -238,6 +307,7 @@ func GenerateDefaultConfig(dir string, projectType ProjectType) (*WorkletConfig,
 			}
 			
 			// Add copy command that only copies if target doesn't exist
+			// The actual templating will be done at container runtime with session context
 			copyCmd := fmt.Sprintf("[ ! -f %s ] && cp %s %s && echo 'Created %s from %s' || true", 
 				targetFile, exampleFile, targetFile, targetFile, exampleFile)
 			initScript = append(initScript, copyCmd)
@@ -248,7 +318,7 @@ func GenerateDefaultConfig(dir string, projectType ProjectType) (*WorkletConfig,
 			initScript = append(initScript, fmt.Sprintf("%s install", packageManager))
 		}
 
-		return &WorkletConfig{
+		config := &WorkletConfig{
 			Name: projectName,
 			Run: RunConfig{
 				Image:      "worklet/base:latest",
@@ -260,7 +330,16 @@ func GenerateDefaultConfig(dir string, projectType ProjectType) (*WorkletConfig,
 				Privileged: true,
 				Isolation:  "full",
 			},
-		}, nil
+		}
+
+		// Enable Claude for cloned repos if credentials are available
+		if isClonedRepo && hasClaudeCredentials() {
+			config.Run.Credentials = &CredentialConfig{
+				Claude: true,
+			}
+		}
+
+		return config, nil
 
 	case ProjectTypePython:
 		return nil, fmt.Errorf("Python project detected. Python runtime support coming soon! Please create a .worklet.jsonc file for now")

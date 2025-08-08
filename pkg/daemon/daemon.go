@@ -43,6 +43,12 @@ type Daemon struct {
 	stateFile    string
 	pidFile      string
 	nginxManager *docker.NginxManager
+	
+	// Cache for container information
+	forksCache      []ForkInfo
+	forksCacheMu    sync.RWMutex
+	forksCacheTime  time.Time
+	forksCacheTTL   time.Duration
 }
 
 // NewDaemon creates a new daemon instance
@@ -70,6 +76,7 @@ func NewDaemon(socketPath string) *Daemon {
 		stateFile:    stateFile,
 		pidFile:      pidFile,
 		nginxManager: nginxManager,
+		forksCacheTTL: 5 * time.Second, // Cache TTL of 5 seconds
 	}
 }
 
@@ -108,6 +115,13 @@ func (d *Daemon) Start() error {
 		log.Printf("Failed to discover containers: %v", err)
 	}
 	
+	// Clean up any orphaned networks from previous runs
+	if removedCount, err := docker.CleanupOrphanedNetworks(); err != nil {
+		log.Printf("Failed to cleanup orphaned networks at startup: %v", err)
+	} else if removedCount > 0 {
+		log.Printf("Cleaned up %d orphaned network(s) at startup", removedCount)
+	}
+	
 	// Start accepting connections
 	go d.acceptConnections()
 	
@@ -116,6 +130,9 @@ func (d *Daemon) Start() error {
 	
 	// Start PID file checker to ensure only one daemon runs
 	go d.startPIDChecker()
+	
+	// Start background container discovery for periodic updates
+	go d.startPeriodicDiscovery()
 	
 	// Start nginx proxy container
 	if d.nginxManager != nil {
@@ -269,6 +286,9 @@ func (d *Daemon) handleRegisterFork(msg *Message) *Message {
 	}
 	d.forksMu.Unlock()
 	
+	// Invalidate cache since we modified forks
+	d.invalidateCache()
+	
 	// Update nginx configuration and ensure it's connected to the fork's network
 	d.updateNginxConfig()
 	
@@ -299,8 +319,16 @@ func (d *Daemon) handleUnregisterFork(msg *Message) *Message {
 	delete(d.forks, req.ForkID)
 	d.forksMu.Unlock()
 	
+	// Invalidate cache since we modified forks
+	d.invalidateCache()
+	
 	// Update nginx configuration
 	d.updateNginxConfig()
+	
+	// Clean up the session network if no containers are using it
+	if err := docker.RemoveSessionNetworkSafe(req.ForkID); err != nil {
+		log.Printf("Warning: failed to remove network for session %s: %v", req.ForkID, err)
+	}
 	
 	return &Message{
 		Type: MsgSuccess,
@@ -315,24 +343,29 @@ func (d *Daemon) handleListForks(msg *Message) *Message {
 	startTime := time.Now()
 	debugLog("handleListForks started for message ID=%s", msg.ID)
 	
-	// First discover any containers that might have been started while daemon was down
-	// or containers that failed to register initially
-	discoverStart := time.Now()
-	if err := d.discoverContainers(); err != nil {
-		log.Printf("Warning: failed to discover containers before listing: %v", err)
-		// Continue anyway - we'll still return what we have
-	}
-	debugLog("discoverContainers completed (took %v)", time.Since(discoverStart))
+	// Check if we have valid cached data
+	d.forksCacheMu.RLock()
+	cacheValid := time.Since(d.forksCacheTime) < d.forksCacheTTL && len(d.forksCache) > 0
+	cachedForks := d.forksCache
+	d.forksCacheMu.RUnlock()
 	
-	// Then validate and cleanup stale forks
-	// This ensures the list is always fresh and accurate
-	validateStart := time.Now()
-	if err := d.validateAndCleanupForks(); err != nil {
-		log.Printf("Warning: failed to validate forks before listing: %v", err)
-		// Continue anyway with potentially stale data
+	if cacheValid {
+		debugLog("Returning cached forks (cache age: %v)", time.Since(d.forksCacheTime))
+		debugLog("handleListForks completed for message ID=%s (total time: %v, from cache)", msg.ID, time.Since(startTime))
+		
+		return &Message{
+			Type: MsgForkList,
+			ID:   msg.ID,
+			Payload: mustMarshal(ListForksResponse{
+				Forks: cachedForks,
+			}),
+		}
 	}
-	debugLog("validateAndCleanupForks completed (took %v)", time.Since(validateStart))
 	
+	// Cache miss or expired - rebuild cache
+	debugLog("Cache miss or expired, rebuilding...")
+	
+	// Get current forks from memory (fast operation)
 	lockStart := time.Now()
 	d.forksMu.RLock()
 	forks := make([]ForkInfo, 0, len(d.forks))
@@ -342,7 +375,13 @@ func (d *Daemon) handleListForks(msg *Message) *Message {
 	d.forksMu.RUnlock()
 	debugLog("Read %d forks from map (lock held for %v)", len(forks), time.Since(lockStart))
 	
-	debugLog("handleListForks completed for message ID=%s (total time: %v)", msg.ID, time.Since(startTime))
+	// Update cache
+	d.forksCacheMu.Lock()
+	d.forksCache = forks
+	d.forksCacheTime = time.Now()
+	d.forksCacheMu.Unlock()
+	
+	debugLog("handleListForks completed for message ID=%s (total time: %v, cache rebuilt)", msg.ID, time.Since(startTime))
 	
 	return &Message{
 		Type: MsgForkList,
@@ -526,6 +565,9 @@ func (d *Daemon) validateAndCleanupForks() error {
 	debugLog("Released write lock after validation (lock held for %v)", time.Since(lockStart))
 
 	if len(forksToRemove) > 0 {
+		// Invalidate cache since we modified forks
+		d.invalidateCache()
+		
 		// Update nginx configuration (now safe to call)
 		nginxStart := time.Now()
 		d.updateNginxConfig()
@@ -757,6 +799,9 @@ func (d *Daemon) discoverContainers() error {
 	debugLog("Released write lock after registration (lock held for %v)", time.Since(lockStart))
 	
 	if discoveredCount > 0 {
+		// Invalidate cache since we modified forks
+		d.invalidateCache()
+		
 		// Update nginx configuration (now safe to call)
 		nginxStart := time.Now()
 		d.updateNginxConfig()
@@ -1045,7 +1090,17 @@ func (d *Daemon) handleContainerRemoved(sessionID string) {
 	
 	// Update nginx configuration if a fork was removed (now safe to call)
 	if exists {
+		// Invalidate cache since we modified forks
+		d.invalidateCache()
+		
 		d.updateNginxConfig()
+		
+		// Clean up the session network if no containers are using it
+		if err := docker.RemoveSessionNetworkSafe(sessionID); err != nil {
+			log.Printf("Warning: failed to remove network for session %s: %v", sessionID, err)
+		} else {
+			log.Printf("Cleaned up network for session %s", sessionID)
+		}
 		
 		// Log the removal
 		if fork.ProjectName != "" {
@@ -1054,6 +1109,14 @@ func (d *Daemon) handleContainerRemoved(sessionID string) {
 			log.Printf("Removed fork %s due to container removal", sessionID)
 		}
 	}
+}
+
+// invalidateCache marks the forks cache as invalid
+func (d *Daemon) invalidateCache() {
+	d.forksCacheMu.Lock()
+	d.forksCacheTime = time.Time{} // Zero time means cache is invalid
+	d.forksCacheMu.Unlock()
+	debugLog("Fork cache invalidated")
 }
 
 // Helper functions
@@ -1073,6 +1136,38 @@ func mustMarshal(v interface{}) json.RawMessage {
 		panic(err)
 	}
 	return data
+}
+
+// startPeriodicDiscovery periodically discovers containers in the background
+func (d *Daemon) startPeriodicDiscovery() {
+	// Initial delay to let the daemon start up
+	time.Sleep(5 * time.Second)
+	
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ticker.C:
+			debugLog("Running periodic container discovery")
+			if err := d.discoverContainers(); err != nil {
+				log.Printf("Periodic container discovery failed: %v", err)
+			}
+			if err := d.validateAndCleanupForks(); err != nil {
+				log.Printf("Periodic fork validation failed: %v", err)
+			}
+			
+			// Clean up orphaned networks
+			if removedCount, err := docker.CleanupOrphanedNetworks(); err != nil {
+				log.Printf("Failed to cleanup orphaned networks: %v", err)
+			} else if removedCount > 0 {
+				log.Printf("Cleaned up %d orphaned network(s)", removedCount)
+			}
+		case <-d.ctx.Done():
+			debugLog("Stopping periodic discovery")
+			return
+		}
+	}
 }
 
 // startPIDChecker periodically checks for duplicate daemons
