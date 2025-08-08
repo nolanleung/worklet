@@ -32,12 +32,6 @@ func RunContainer(opts RunOptions) (string, error) {
 	var imageName string
 	var err error
 
-	// Process environment templates before container start
-	if err := processEnvironmentTemplates(opts); err != nil {
-		// Log warning but don't fail the container start
-		fmt.Printf("Warning: Failed to process environment templates: %v\n", err)
-	}
-
 	// Ensure session-specific Docker network exists before running container
 	if err := EnsureSessionNetworkExists(opts.SessionID); err != nil {
 		return "", fmt.Errorf("failed to ensure session Docker network exists: %w", err)
@@ -55,6 +49,12 @@ func RunContainer(opts RunOptions) (string, error) {
 		imageName = opts.Config.Run.Image
 		if imageName == "" {
 			imageName = "docker:dind"
+		}
+		
+		// Process environment templates for mount mode (write to host directory)
+		if err := processEnvironmentTemplates(opts.WorkDir, opts.WorkDir, opts); err != nil {
+			// Log warning but don't fail the container start
+			fmt.Printf("Warning: Failed to process environment templates: %v\n", err)
 		}
 	}
 
@@ -112,6 +112,10 @@ func RunContainer(opts RunOptions) (string, error) {
 
 		// Set isolation mode environment variable
 		args = append(args, "-e", "WORKLET_ISOLATION=full")
+		
+		// Set Docker environment variables for DinD
+		args = append(args, "-e", "DOCKER_TLS_CERTDIR=")
+		args = append(args, "-e", "DOCKER_DRIVER=overlay2")
 		
 		// Create and mount Docker storage volumes for caching only images (not container state)
 		// We mount specific subdirectories to avoid persisting container state which causes conflicts
@@ -336,6 +340,17 @@ WORKDIR /workspace
 		return "", fmt.Errorf("failed to copy workspace: %w", err)
 	}
 
+	// Process environment templates for copy mode (write to build context, not host)
+	opts := RunOptions{
+		WorkDir:   workDir,
+		Config:    cfg,
+		SessionID: sessionID,
+	}
+	if err := processEnvironmentTemplates(workDir, workspaceDir, opts); err != nil {
+		// Log warning but don't fail the build
+		fmt.Printf("Warning: Failed to process environment templates: %v\n", err)
+	}
+
 	// Build the image
 	cmd := exec.Command("docker", "build", "-t", imageName, buildDir)
 	cmd.Stdout = os.Stdout
@@ -534,7 +549,9 @@ func copyFile(src, dst string) error {
 }
 
 // processEnvironmentTemplates processes .env.example files with templating
-func processEnvironmentTemplates(opts RunOptions) error {
+// srcDir is where to read .env.example files from
+// targetDir is where to write processed .env files to
+func processEnvironmentTemplates(srcDir, targetDir string, opts RunOptions) error {
 	// Only process templates if we have services defined
 	if len(opts.Config.Services) == 0 {
 		return nil
@@ -548,7 +565,8 @@ func processEnvironmentTemplates(opts RunOptions) error {
 
 	// Process env files with templating
 	return config.ProcessEnvFilesWithTemplating(
-		opts.WorkDir,
+		srcDir,
+		targetDir,
 		opts.SessionID,
 		projectName,
 		opts.Config.Services,

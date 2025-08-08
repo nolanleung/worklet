@@ -205,9 +205,11 @@ func DetectEnvExampleFiles(dir string) ([]string, error) {
 }
 
 // ProcessEnvFilesWithTemplating processes .env.example files and applies templating
-func ProcessEnvFilesWithTemplating(dir string, sessionID string, projectName string, services []ServiceConfig) error {
-	// Find all .env.example files
-	envExampleFiles, err := DetectEnvExampleFiles(dir)
+// srcDir is the source directory to read .env.example files from
+// targetDir is the directory where processed .env files will be written (can be different from srcDir)
+func ProcessEnvFilesWithTemplating(srcDir, targetDir string, sessionID string, projectName string, services []ServiceConfig) error {
+	// Find all .env.example files in source directory
+	envExampleFiles, err := DetectEnvExampleFiles(srcDir)
 	if err != nil {
 		return err
 	}
@@ -231,8 +233,8 @@ func ProcessEnvFilesWithTemplating(dir string, sessionID string, projectName str
 
 	// Process each .env.example file
 	for _, exampleFile := range envExampleFiles {
-		// Read the example file
-		examplePath := filepath.Join(dir, exampleFile)
+		// Read the example file from source directory
+		examplePath := filepath.Join(srcDir, exampleFile)
 		content, err := os.ReadFile(examplePath)
 		if err != nil {
 			continue // Skip if can't read
@@ -250,7 +252,17 @@ func ProcessEnvFilesWithTemplating(dir string, sessionID string, projectName str
 			continue
 		}
 
-		targetPath := filepath.Join(dir, targetFile)
+		// Write to target directory (which may be different from source)
+		targetPath := filepath.Join(targetDir, targetFile)
+
+		// Create parent directories in target if needed
+		targetSubdir := filepath.Dir(targetFile)
+		if targetSubdir != "." {
+			fullTargetDir := filepath.Join(targetDir, targetSubdir)
+			if err := os.MkdirAll(fullTargetDir, 0755); err != nil {
+				return fmt.Errorf("failed to create target directory %s: %w", fullTargetDir, err)
+			}
+		}
 
 		// Check if target already exists
 		if _, err := os.Stat(targetPath); err == nil {
@@ -326,6 +338,8 @@ func GenerateDefaultConfig(dir string, projectType ProjectType, isClonedRepo boo
 				InitScript: initScript,
 				Environment: map[string]string{
 					"COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+					"DOCKER_TLS_CERTDIR":               "",
+					"DOCKER_DRIVER":                    "overlay2",
 				},
 				Privileged: true,
 				Isolation:  "full",

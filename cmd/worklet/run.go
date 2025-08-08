@@ -266,9 +266,29 @@ func runInDirectoryWithCloned(dir string, isClonedRepo bool, cmdArgs ...string) 
 
 	fmt.Printf("Container started in background with ID: %s\n", containerID[:12])
 	fmt.Printf("Session ID: %s\n", sessionID)
-	if shouldStartTerminal {
+	
+	// Get project name for URL generation
+	projectName := cfg.Name
+	if projectName == "" {
+		projectName = "worklet"
+	}
+	
+	// Display service URLs if services are defined
+	if len(cfg.Services) > 0 {
+		fmt.Println("Access your app at:")
+		for _, svc := range cfg.Services {
+			subdomain := svc.Subdomain
+			if subdomain == "" {
+				subdomain = svc.Name
+			}
+			url := fmt.Sprintf("http://%s.%s-%s.local.worklet.sh", subdomain, projectName, sessionID)
+			fmt.Printf("  - %s: %s (port %d)\n", svc.Name, url, svc.Port)
+		}
+	} else if shouldStartTerminal {
+		// If no services defined but terminal is enabled, show terminal URL
 		fmt.Printf("Access terminal at: http://localhost:%d\n", runTerminalPort)
 	}
+	
 	return nil
 }
 
