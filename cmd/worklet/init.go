@@ -173,7 +173,7 @@ func formatConfigAsJSONC(cfg *config.WorkletConfig) string {
     
     // Additional volume mounts
     // Example: ["/host/path:/container/path", "volume-name:/data"]
-    "volumes": %s`, 
+    "volumes": %s`,
 		escapeQuotes(cfg.Name),
 		escapeQuotes(cfg.Run.Image),
 		commandStr,
@@ -181,15 +181,7 @@ func formatConfigAsJSONC(cfg *config.WorkletConfig) string {
 		envStr,
 		volumeStr)
 
-	// Add optional fields
-	if cfg.Run.Privileged {
-		result += `,
-    
-    // Docker-in-Docker support
-    "privileged": true`
-	}
-
-	if cfg.Run.Isolation != "" {
+	if cfg.Run.Isolation != "" && cfg.Run.Isolation != "full" {
 		result += fmt.Sprintf(`,
     
     // Container isolation mode

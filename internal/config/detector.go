@@ -227,20 +227,20 @@ func DetectNodeCommand(dir string) ([]string, error) {
 // DetectEnvExampleFiles finds all .env.example files in the project directory
 func DetectEnvExampleFiles(dir string) ([]string, error) {
 	var envFiles []string
-	
+
 	// Patterns to look for
 	patterns := []string{
 		".env.example",
 		".env.sample",
 		".env.template",
 	}
-	
+
 	// Walk through the directory to find env example files
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip files we can't access
 		}
-		
+
 		// Skip directories
 		if info.IsDir() {
 			// Skip node_modules and other common directories
@@ -249,7 +249,7 @@ func DetectEnvExampleFiles(dir string) ([]string, error) {
 			}
 			return nil
 		}
-		
+
 		// Check if file matches any of our patterns
 		fileName := info.Name()
 		for _, pattern := range patterns {
@@ -263,15 +263,133 @@ func DetectEnvExampleFiles(dir string) ([]string, error) {
 				break
 			}
 		}
-		
+
 		return nil
 	})
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return envFiles, nil
+}
+
+// parseEnvFile parses environment file content into a map
+func parseEnvFile(content string) map[string]string {
+	envMap := make(map[string]string)
+	lines := strings.Split(content, "\n")
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		
+		// Find the first = sign
+		equalIndex := strings.Index(line, "=")
+		if equalIndex == -1 {
+			continue
+		}
+		
+		key := strings.TrimSpace(line[:equalIndex])
+		value := strings.TrimSpace(line[equalIndex+1:])
+		
+		// Remove surrounding quotes if present
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') ||
+			   (value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		
+		envMap[key] = value
+	}
+	
+	return envMap
+}
+
+// formatEnvFile formats a map back into environment file content
+func formatEnvFile(envMap map[string]string, originalContent string) string {
+	// Parse original content to preserve order and comments
+	var result []string
+	processedKeys := make(map[string]bool)
+	
+	if originalContent != "" {
+		lines := strings.Split(originalContent, "\n")
+		for _, line := range lines {
+			trimmedLine := strings.TrimSpace(line)
+			
+			// Preserve empty lines and comments
+			if trimmedLine == "" || strings.HasPrefix(trimmedLine, "#") {
+				result = append(result, line)
+				continue
+			}
+			
+			// Check if this is a key-value pair
+			equalIndex := strings.Index(line, "=")
+			if equalIndex == -1 {
+				result = append(result, line)
+				continue
+			}
+			
+			key := strings.TrimSpace(line[:equalIndex])
+			
+			// If this key exists in our map, use the new value
+			if newValue, exists := envMap[key]; exists {
+				// Preserve the original formatting style
+				if strings.Contains(line, "\"") {
+					result = append(result, fmt.Sprintf("%s=\"%s\"", key, newValue))
+				} else if strings.Contains(line, "'") {
+					result = append(result, fmt.Sprintf("%s='%s'", key, newValue))
+				} else {
+					result = append(result, fmt.Sprintf("%s=%s", key, newValue))
+				}
+				processedKeys[key] = true
+			} else {
+				// Key was removed, skip it
+				continue
+			}
+		}
+	}
+	
+	// Add any new keys that weren't in the original
+	for key, value := range envMap {
+		if !processedKeys[key] {
+			// Use double quotes for new values that contain spaces or special characters
+			if strings.ContainsAny(value, " \t\n'\"\\$") {
+				result = append(result, fmt.Sprintf("%s=\"%s\"", key, value))
+			} else {
+				result = append(result, fmt.Sprintf("%s=%s", key, value))
+			}
+		}
+	}
+	
+	return strings.Join(result, "\n")
+}
+
+// mergeEnvMaps merges two environment maps, with updates taking precedence
+// Empty values from updates will not overwrite non-empty existing values
+func mergeEnvMaps(existing, updates map[string]string) map[string]string {
+	merged := make(map[string]string)
+	
+	// Copy existing values
+	for k, v := range existing {
+		merged[k] = v
+	}
+	
+	// Override with updates, but only if:
+	// - The update value is non-empty, OR
+	// - The existing value is also empty
+	for k, v := range updates {
+		if v != "" || existing[k] == "" {
+			merged[k] = v
+		}
+		// If v is empty and existing[k] is non-empty, keep existing value
+	}
+	
+	return merged
 }
 
 // ProcessEnvFilesWithTemplating processes .env.example files and applies templating
@@ -334,17 +452,31 @@ func ProcessEnvFilesWithTemplating(srcDir, targetDir string, sessionID string, p
 			}
 		}
 
-		// Check if target already exists
-		if _, err := os.Stat(targetPath); err == nil {
-			// Target exists, skip
-			continue
-		}
-
 		// Process template
 		processedContent := env.ProcessTemplate(string(content), ctx)
+		
+		// Parse the processed .env.example into a map
+		exampleEnvMap := parseEnvFile(processedContent)
+		
+		var finalContent string
+		
+		// Check if target .env already exists
+		if existingContent, err := os.ReadFile(targetPath); err == nil {
+			// Target exists, merge with existing content
+			existingEnvMap := parseEnvFile(string(existingContent))
+			
+			// Merge maps: existing values are kept, but overridden by example values
+			mergedEnvMap := mergeEnvMaps(existingEnvMap, exampleEnvMap)
+			
+			// Format back to env file, preserving original structure where possible
+			finalContent = formatEnvFile(mergedEnvMap, string(existingContent))
+		} else {
+			// Target doesn't exist, use processed content directly
+			finalContent = formatEnvFile(exampleEnvMap, processedContent)
+		}
 
-		// Write processed content to target file
-		if err := os.WriteFile(targetPath, []byte(processedContent), 0644); err != nil {
+		// Write final content to target file
+		if err := os.WriteFile(targetPath, []byte(finalContent), 0644); err != nil {
 			return fmt.Errorf("failed to write %s: %w", targetFile, err)
 		}
 	}
@@ -362,7 +494,7 @@ func GenerateDefaultConfig(dir string, projectType ProjectType, isClonedRepo boo
 		if pkg, err := ReadPackageJSON(dir); err == nil && pkg.Name != "" {
 			projectName = pkg.Name
 		}
-		
+
 		command, err := DetectNodeCommand(dir)
 		if err != nil {
 			return nil, err
@@ -370,31 +502,10 @@ func GenerateDefaultConfig(dir string, projectType ProjectType, isClonedRepo boo
 
 		// Detect package manager for install command
 		packageManager := DetectPackageManager(dir)
-		
+
 		// Build init script with install command
 		var initScript []string
-		
-		// Detect and process .env.example files with templating
-		// Note: This creates a basic copy command, actual templating happens at runtime
-		envExampleFiles, _ := DetectEnvExampleFiles(dir)
-		for _, exampleFile := range envExampleFiles {
-			// Get the target .env file path by removing the .example/.sample/.template suffix
-			var targetFile string
-			if strings.HasSuffix(exampleFile, ".example") {
-				targetFile = strings.TrimSuffix(exampleFile, ".example")
-			} else if strings.HasSuffix(exampleFile, ".sample") {
-				targetFile = strings.TrimSuffix(exampleFile, ".sample")
-			} else if strings.HasSuffix(exampleFile, ".template") {
-				targetFile = strings.TrimSuffix(exampleFile, ".template")
-			}
-			
-			// Add copy command that only copies if target doesn't exist
-			// The actual templating will be done at container runtime with session context
-			copyCmd := fmt.Sprintf("[ ! -f %s ] && cp %s %s && echo 'Created %s from %s' || true", 
-				targetFile, exampleFile, targetFile, targetFile, exampleFile)
-			initScript = append(initScript, copyCmd)
-		}
-		
+
 		// Skip install for Deno as it downloads dependencies on demand
 		if packageManager != "deno" {
 			initScript = append(initScript, fmt.Sprintf("%s install", packageManager))
@@ -406,11 +517,6 @@ func GenerateDefaultConfig(dir string, projectType ProjectType, isClonedRepo boo
 				Image:      "worklet/base:latest",
 				Command:    command,
 				InitScript: initScript,
-				Environment: map[string]string{
-					"COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
-					"DOCKER_TLS_CERTDIR":               "",
-					"DOCKER_DRIVER":                    "overlay2",
-				},
 				Privileged: true,
 				Isolation:  "full",
 			},
@@ -428,29 +534,10 @@ func GenerateDefaultConfig(dir string, projectType ProjectType, isClonedRepo boo
 	case ProjectTypePython:
 		command := DetectPythonCommand(dir)
 		packageManager := DetectPythonPackageManager(dir)
-		
+
 		// Build init script with install command
 		var initScript []string
-		
-		// Detect and process .env.example files with templating
-		envExampleFiles, _ := DetectEnvExampleFiles(dir)
-		for _, exampleFile := range envExampleFiles {
-			// Get the target .env file path by removing the suffix
-			var targetFile string
-			if strings.HasSuffix(exampleFile, ".example") {
-				targetFile = strings.TrimSuffix(exampleFile, ".example")
-			} else if strings.HasSuffix(exampleFile, ".sample") {
-				targetFile = strings.TrimSuffix(exampleFile, ".sample")
-			} else if strings.HasSuffix(exampleFile, ".template") {
-				targetFile = strings.TrimSuffix(exampleFile, ".template")
-			}
-			
-			// Add copy command that only copies if target doesn't exist
-			copyCmd := fmt.Sprintf("[ ! -f %s ] && cp %s %s && echo 'Created %s from %s' || true", 
-				targetFile, exampleFile, targetFile, targetFile, exampleFile)
-			initScript = append(initScript, copyCmd)
-		}
-		
+
 		// Add package installation based on detected package manager
 		switch packageManager {
 		case "uv":
@@ -474,7 +561,7 @@ func GenerateDefaultConfig(dir string, projectType ProjectType, isClonedRepo boo
 				initScript = append(initScript, "pip install -e .")
 			}
 		}
-		
+
 		// Install common web frameworks if detected in command
 		for _, cmd := range command {
 			if strings.Contains(cmd, "gunicorn") {
