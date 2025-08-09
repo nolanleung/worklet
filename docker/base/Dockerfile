@@ -1,183 +1,39 @@
-FROM docker:dind
+FROM debian:12-slim
 
-ENV NODE_VERSION=24.4.1
+# Install base dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    gnupg \
+    ca-certificates \
+    unzip \
+    xz-utils \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN addgroup -g 1000 node \
-    && adduser -u 1000 -G node -s /bin/sh -D node \
-    && apk add --no-cache \
-        libstdc++ \
-    && apk add --no-cache --virtual .build-deps \
-        curl \
-    && ARCH= OPENSSL_ARCH='linux*' && alpineArch="$(apk --print-arch)" \
-      && case "${alpineArch##*-}" in \
-        x86_64) ARCH='x64' CHECKSUM="529475bf6cd07c33c5a030e7065dfb8dd22ffdfa988f872faa37ca9cb51242f8" OPENSSL_ARCH=linux-x86_64;; \
-        x86) OPENSSL_ARCH=linux-elf;; \
-        aarch64) OPENSSL_ARCH=linux-aarch64;; \
-        arm*) OPENSSL_ARCH=linux-armv4;; \
-        ppc64le) OPENSSL_ARCH=linux-ppc64le;; \
-        s390x) OPENSSL_ARCH=linux-s390x;; \
-        *) ;; \
-      esac \
-  && if [ -n "${CHECKSUM}" ]; then \
-    set -eu; \
-    curl -fsSLO --compressed "https://unofficial-builds.nodejs.org/download/release/v$NODE_VERSION/node-v$NODE_VERSION-linux-$ARCH-musl.tar.xz"; \
-    echo "$CHECKSUM  node-v$NODE_VERSION-linux-$ARCH-musl.tar.xz" | sha256sum -c - \
-      && tar -xJf "node-v$NODE_VERSION-linux-$ARCH-musl.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
-      && ln -s /usr/local/bin/node /usr/local/bin/nodejs; \
-  else \
-    echo "Building from source" \
-    # backup build
-    && apk add --no-cache --virtual .build-deps-full \
-        binutils-gold \
-        g++ \
-        gcc \
-        gnupg \
-        libgcc \
-        linux-headers \
-        make \
-        python3 \
-        py-setuptools \
-    # use pre-existing gpg directory, see https://github.com/nodejs/docker-node/pull/1895#issuecomment-1550389150
-    && export GNUPGHOME="$(mktemp -d)" \
-    # gpg keys listed at https://github.com/nodejs/node#release-keys
-    && for key in \
-      C0D6248439F1D5604AAFFB4021D900FFDB233756 \
-      DD792F5973C6DE52C432CBDAC77ABFA00DDBF2B7 \
-      CC68F5A3106FF448322E48ED27F5E38D5B0A215F \
-      8FCCA13FEF1D0C2E91008E09770F7A9A5AE15600 \
-      890C08DB8579162FEE0DF9DB8BEAB4DFCF555EF4 \
-      C82FA3AE1CBEDC6BE46B9360C43CEC45C17AB93C \
-      108F52B48DB57BB0CC439B2997B01419BD92F80A \
-      A363A499291CBBC940DD62E41F10027AF002F8B0 \
-    ; do \
-      { gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$key" && gpg --batch --fingerprint "$key"; } || \
-      { gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key" && gpg --batch --fingerprint "$key"; } ; \
-    done \
-    && curl -fsSLO --compressed "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION.tar.xz" \
-    && curl -fsSLO --compressed "https://nodejs.org/dist/v$NODE_VERSION/SHASUMS256.txt.asc" \
-    && gpg --batch --decrypt --output SHASUMS256.txt SHASUMS256.txt.asc \
-    && gpgconf --kill all \
-    && rm -rf "$GNUPGHOME" \
-    && grep " node-v$NODE_VERSION.tar.xz\$" SHASUMS256.txt | sha256sum -c - \
-    && tar -xf "node-v$NODE_VERSION.tar.xz" \
-    && cd "node-v$NODE_VERSION" \
-    && ./configure \
-    && make -j$(getconf _NPROCESSORS_ONLN) V= \
-    && make install \
-    && apk del .build-deps-full \
-    && cd .. \
-    && rm -Rf "node-v$NODE_VERSION" \
-    && rm "node-v$NODE_VERSION.tar.xz" SHASUMS256.txt.asc SHASUMS256.txt; \
-  fi \
-  && rm -f "node-v$NODE_VERSION-linux-$ARCH-musl.tar.xz" \
-  # Remove unused OpenSSL headers to save ~34MB. See this NodeJS issue: https://github.com/nodejs/node/issues/46451
-  && find /usr/local/include/node/openssl/archs -mindepth 1 -maxdepth 1 ! -name "$OPENSSL_ARCH" -exec rm -rf {} \; \
-  && apk del .build-deps \
-  # smoke tests
-  && node --version \
-  && npm --version \
-  && rm -rf /tmp/*
+# Install Node.js
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+  apt-get install -y nodejs
 
-ENV YARN_VERSION=1.22.22
-
-RUN apk add --no-cache --virtual .build-deps-yarn curl gnupg tar \
-  # use pre-existing gpg directory, see https://github.com/nodejs/docker-node/pull/1895#issuecomment-1550389150
-  && export GNUPGHOME="$(mktemp -d)" \
-  && for key in \
-    6A010C5166006599AA17F08146C2130DFD2497F5 \
-  ; do \
-    { gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$key" && gpg --batch --fingerprint "$key"; } || \
-    { gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key" && gpg --batch --fingerprint "$key"; } ; \
-  done \
-  && curl -fsSLO --compressed "https://yarnpkg.com/downloads/$YARN_VERSION/yarn-v$YARN_VERSION.tar.gz" \
-  && curl -fsSLO --compressed "https://yarnpkg.com/downloads/$YARN_VERSION/yarn-v$YARN_VERSION.tar.gz.asc" \
-  && gpg --batch --verify yarn-v$YARN_VERSION.tar.gz.asc yarn-v$YARN_VERSION.tar.gz \
-  && gpgconf --kill all \
-  && rm -rf "$GNUPGHOME" \
-  && mkdir -p /opt \
-  && tar -xzf yarn-v$YARN_VERSION.tar.gz -C /opt/ \
-  && ln -s /opt/yarn-v$YARN_VERSION/bin/yarn /usr/local/bin/yarn \
-  && ln -s /opt/yarn-v$YARN_VERSION/bin/yarnpkg /usr/local/bin/yarnpkg \
-  && rm yarn-v$YARN_VERSION.tar.gz.asc yarn-v$YARN_VERSION.tar.gz \
-  && apk del .build-deps-yarn \
-  # smoke test
-  && yarn --version \
-  && rm -rf /tmp/*
-
-
-  # https://github.com/oven-sh/bun/releases
-ARG BUN_VERSION=latest
-
-RUN apk --no-cache add ca-certificates curl dirmngr gpg gpg-agent unzip libgcc libstdc++ bash \
-    && arch="$(apk --print-arch)" \
-    && case "${arch##*-}" in \
-    x86_64) build="x64-musl-baseline";; \
-    aarch64) build="aarch64-musl";; \
-    *) echo "error: unsupported architecture: $arch"; exit 1 ;; \
-    esac \
-    && version="$BUN_VERSION" \
-    && case "$version" in \
-    latest | canary | bun-v*) tag="$version"; ;; \
-    v*)                       tag="bun-$version"; ;; \
-    *)                        tag="bun-v$version"; ;; \
-    esac \
-    && case "$tag" in \
-    latest) release="latest/download"; ;; \
-    *)      release="download/$tag"; ;; \
-    esac \
-    && curl "https://github.com/oven-sh/bun/releases/$release/bun-linux-$build.zip" \
-    -fsSLO \
-    --compressed \
-    --retry 5 \
-    || (echo "error: failed to download: $tag" && exit 1) \
-    && for key in \
-    "F3DCC08A8572C0749B3E18888EAB4D40A7B22B59" \
-    ; do \
-    gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$key" \
-    || gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key" ; \
-    done \
-    && curl "https://github.com/oven-sh/bun/releases/$release/SHASUMS256.txt.asc" \
-    -fsSLO \
-    --compressed \
-    --retry 5 \
-    && gpg --batch --decrypt --output SHASUMS256.txt SHASUMS256.txt.asc \
-    || (echo "error: failed to verify: $tag" && exit 1) \
-    && grep " bun-linux-$build.zip\$" SHASUMS256.txt | sha256sum -c - \
-    || (echo "error: failed to verify: $tag" && exit 1) \
-    && unzip "bun-linux-$build.zip" \
-    && mv "bun-linux-$build/bun" /usr/local/bin/bun \
-    && rm -f "bun-linux-$build.zip" SHASUMS256.txt.asc SHASUMS256.txt \
-    && chmod +x /usr/local/bin/bun
-
-# Disable the runtime transpiler cache by default inside Docker containers.
-# On ephemeral containers, the cache is not useful
-ARG BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
-ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=${BUN_RUNTIME_TRANSPILER_CACHE_PATH}
-
-# Ensure `bun install -g` works
-ARG BUN_INSTALL_BIN=/usr/local/bin
-ENV BUN_INSTALL_BIN=${BUN_INSTALL_BIN}
-
-RUN mkdir -p /usr/local/bun-node-fallback-bin && ln -s /usr/local/bin/bun /usr/local/bun-node-fallback-bin/node
-ENV PATH="${PATH}:/usr/local/bun-node-fallback-bin"
-
-ENV PNPM_HOME="/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
-# Disable Corepack download prompts
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# Enable corepack
 RUN corepack enable
 
-# Install PNPM globally
+# Enable yarn
+RUN corepack prepare yarn@stable --activate
+
+# Enable pnpm
 RUN corepack prepare pnpm@latest --activate
 
-# Set the TERM environment variable to enable color output in terminal applications
-ENV TERM=xterm-256color
+# Install Bun
+RUN curl -fsSL https://bun.sh/install | bash
 
-RUN bun add --global @anthropic-ai/claude-code
+# Install python 3.11
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Python 3.12 and common tools
-RUN apk add --no-cache \
-    python3 \
-    python3-dev \
-    py3-pip \
-    py3-virtualenv
+# Install rust
+RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
