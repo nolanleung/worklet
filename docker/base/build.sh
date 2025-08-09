@@ -32,3 +32,7 @@ else
     echo -e "${RED}Failed to build image${NC}"
     exit 1
 fi
+
+# Clean up dangling images
+echo -e "${YELLOW}Cleaning up dangling images...${NC}"
+docker image prune -f

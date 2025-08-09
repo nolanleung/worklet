@@ -54,6 +54,13 @@ var daemonRestartCmd = &cobra.Command{
 	RunE:  runDaemonRestart,
 }
 
+var daemonRefreshCmd = &cobra.Command{
+	Use:   "refresh",
+	Short: "Refresh daemon state",
+	Long:  `Refresh the daemon's state by discovering all running worklet containers and updating registrations. This is useful when containers are started/stopped outside of worklet.`,
+	RunE:  runDaemonRefresh,
+}
+
 var (
 	daemonForeground bool
 )
@@ -64,6 +71,7 @@ func init() {
 	daemonCmd.AddCommand(daemonStartCmd)
 	daemonCmd.AddCommand(daemonStopCmd)
 	daemonCmd.AddCommand(daemonRestartCmd)
+	daemonCmd.AddCommand(daemonRefreshCmd)
 	daemonCmd.AddCommand(daemonStatusCmd)
 	daemonCmd.AddCommand(daemonLogsCmd)
 }
@@ -292,4 +300,63 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 	// Start daemon
 	fmt.Println("Starting daemon...")
 	return runDaemonStart(cmd, args)
+}
+
+func runDaemonRefresh(cmd *cobra.Command, args []string) error {
+	socketPath := daemon.GetDefaultSocketPath()
+	
+	// Check if daemon is running
+	if !daemon.IsDaemonRunning(socketPath) {
+		return fmt.Errorf("daemon is not running")
+	}
+	
+	// Connect to daemon
+	client := daemon.NewClient(socketPath)
+	if err := client.Connect(); err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer client.Close()
+	
+	fmt.Println("Refreshing daemon state...")
+	
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	// Trigger refresh
+	if err := client.RefreshAll(ctx); err != nil {
+		return fmt.Errorf("failed to refresh daemon: %w", err)
+	}
+	
+	// Get updated fork list to show results
+	forks, err := client.ListForks(ctx)
+	if err != nil {
+		// Refresh succeeded but couldn't get list - not critical
+		fmt.Println("✓ Daemon refreshed successfully")
+		return nil
+	}
+	
+	fmt.Println("✓ Daemon refreshed successfully")
+	fmt.Printf("\nDiscovered %d active fork(s):\n", len(forks))
+	
+	if len(forks) > 0 {
+		fmt.Println("\nFork ID          Container ID     Services")
+		fmt.Println("---------------- ---------------- --------")
+		for _, fork := range forks {
+			services := ""
+			for i, svc := range fork.Services {
+				if i > 0 {
+					services += ", "
+				}
+				services += fmt.Sprintf("%s:%d", svc.Name, svc.Port)
+			}
+			containerID := fork.ContainerID
+			if len(containerID) > 12 {
+				containerID = containerID[:12]
+			}
+			fmt.Printf("%-16s %-16s %s\n", fork.ForkID, containerID, services)
+		}
+	}
+	
+	return nil
 }

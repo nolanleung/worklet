@@ -9,39 +9,79 @@ trap '' INT TERM HUP
 if [ "$WORKLET_ISOLATION" = "full" ]; then
     echo "Starting Docker daemon in full isolation mode..."
     
-    # Ensure /var/run exists
+    # Ensure required directories exist
     mkdir -p /var/run
+    mkdir -p /var/log
     
-    # Start dockerd in a new session to isolate from terminal signals
-    if command -v setsid >/dev/null 2>&1; then
-        # Use setsid to create a new session
-        setsid dockerd \
-            --host=unix:///var/run/docker.sock \
-            --storage-driver="${DOCKER_DRIVER:-overlay2}" \
-            ${DOCKER_OPTS} >/dev/null 2>&1 &
-    else
-        # Fallback to nohup if setsid is not available
+    # Function to start Docker daemon with a specific storage driver
+    start_dockerd() {
+        local driver=$1
+        echo "Attempting to start Docker daemon..."
+        
+        # Start Docker daemon with explicit configuration
         nohup dockerd \
+            --log-level=error \
             --host=unix:///var/run/docker.sock \
-            --storage-driver="${DOCKER_DRIVER:-overlay2}" \
-            ${DOCKER_OPTS} >/dev/null 2>&1 &
-    fi
+            > /var/log/docker.log 2> /var/log/docker-errors.log &
+        
+        return $?
+    }
+    
+    # Try to start with overlay2 first (preferred)
+    start_dockerd "overlay2"
+    DOCKERD_PID=$!
     
     # Wait for Docker to be ready
     echo "Waiting for Docker daemon to start..."
     timeout=30
     while [ $timeout -gt 0 ]; do
         if docker version >/dev/null 2>&1; then
-            echo "Docker daemon is ready"
+            echo "✓ Docker daemon is ready"
+            # Show which storage driver is being used
+            docker info 2>/dev/null | grep "Storage Driver" || true
             break
         fi
+        
+        # Show progress
+        if [ $((timeout % 5)) -eq 0 ]; then
+            echo "  Waiting... ($timeout seconds remaining)"
+        fi
+        
         timeout=$((timeout - 1))
         sleep 1
     done
     
     if [ $timeout -eq 0 ]; then
-        echo "Docker daemon failed to start" >&2
-        exit 1
+        echo "" >&2
+        echo "ERROR: Docker daemon failed to start after 30 seconds" >&2
+        echo "" >&2
+        
+        # If still not working, show diagnostic information
+        if ! docker version >/dev/null 2>&1; then
+            echo "" >&2
+            echo "=== Docker Daemon Error Log (last 20 lines) ===" >&2
+            tail -20 /var/log/docker-errors.log 2>/dev/null || echo "(No error log available)" >&2
+            echo "" >&2
+            echo "=== Docker Daemon Output Log (last 20 lines) ===" >&2
+            tail -20 /var/log/docker.log 2>/dev/null || echo "(No output log available)" >&2
+            echo "" >&2
+            echo "=== System Information ===" >&2
+            echo "Kernel: $(uname -r)" >&2
+            echo "Architecture: $(uname -m)" >&2
+            echo "" >&2
+            echo "=== Available Storage Drivers ===" >&2
+            # Check for overlay module
+            if [ -e /proc/filesystems ]; then
+                grep overlay /proc/filesystems 2>/dev/null || echo "overlay: not available" >&2
+            fi
+            echo "" >&2
+            echo "Please check:" >&2
+            echo "1. The container is running with --privileged flag" >&2
+            echo "2. The host kernel supports the required storage drivers" >&2
+            echo "3. There is sufficient disk space available" >&2
+            echo "" >&2
+            exit 1
+        fi
     fi
     
     # Start docker-compose services if configured

@@ -117,31 +117,22 @@ func RunContainer(opts RunOptions) (string, error) {
 		args = append(args, "-e", "DOCKER_TLS_CERTDIR=")
 		args = append(args, "-e", "DOCKER_DRIVER=overlay2")
 
-		// Create and mount Docker storage volumes for caching only images (not container state)
-		// We mount specific subdirectories to avoid persisting container state which causes conflicts
-		dockerImageVolume := fmt.Sprintf("worklet-docker-images-%s", projectName)
-		dockerOverlayVolume := fmt.Sprintf("worklet-docker-overlay-%s", projectName)
+		// Create volume for Docker data
+		args = append(args, "-v", fmt.Sprintf("worklet-%s:/var/lib/docker", opts.SessionID))
 
-		if err := ensureDockerVolumeExists(dockerImageVolume); err != nil {
-			return "", fmt.Errorf("failed to create Docker image volume: %w", err)
+		// In mount mode, we need to mount the entrypoint script since it's not in the base image
+		// In copy mode, the entrypoint script is already included in the built image
+		if opts.MountMode {
+			// Mount the entrypoint script
+			scriptPath, err := getEntrypointScriptPath()
+			if err != nil {
+				return "", fmt.Errorf("failed to get entrypoint script path: %w", err)
+			}
+			// Ensure cleanup of temp script file
+			defer os.Remove(scriptPath)
+
+			args = append(args, "-v", fmt.Sprintf("%s:/entrypoint.sh:ro", scriptPath))
 		}
-		if err := ensureDockerVolumeExists(dockerOverlayVolume); err != nil {
-			return "", fmt.Errorf("failed to create Docker overlay volume: %w", err)
-		}
-
-		// Mount only the image and overlay directories to cache layers but not container state
-		args = append(args, "-v", fmt.Sprintf("%s:/var/lib/docker/image", dockerImageVolume))
-		args = append(args, "-v", fmt.Sprintf("%s:/var/lib/docker/overlay2", dockerOverlayVolume))
-
-		// Mount the entrypoint script
-		scriptPath, err := getEntrypointScriptPath()
-		if err != nil {
-			return "", fmt.Errorf("failed to get entrypoint script path: %w", err)
-		}
-		// Ensure cleanup of temp script file
-		defer os.Remove(scriptPath)
-
-		args = append(args, "-v", fmt.Sprintf("%s:/entrypoint.sh:ro", scriptPath))
 
 		// Set entrypoint
 		args = append(args, "--entrypoint", "/entrypoint.sh")
@@ -317,9 +308,17 @@ func buildCopyImage(workDir string, cfg *config.WorkletConfig, sessionID string)
 	}
 	defer os.RemoveAll(buildDir)
 
+	// Write the entrypoint script to the build context
+	entrypointPath := filepath.Join(buildDir, "entrypoint.sh")
+	if err := os.WriteFile(entrypointPath, []byte(dindEntrypointScript), 0755); err != nil {
+		return "", fmt.Errorf("failed to write entrypoint script: %w", err)
+	}
+
 	// Create Dockerfile
 	dockerfilePath := filepath.Join(buildDir, "Dockerfile")
 	dockerfileContent := fmt.Sprintf(`FROM %s
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 COPY workspace /workspace
 WORKDIR /workspace
 `, baseImage)
