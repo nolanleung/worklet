@@ -11,8 +11,7 @@ import (
 )
 
 var (
-	initForce   bool
-	initMinimal bool
+	initForce bool
 )
 
 var initCmd = &cobra.Command{
@@ -42,7 +41,7 @@ var initCmd = &cobra.Command{
 		projectName := getProjectName()
 
 		// Generate config
-		config := generateConfig(projectName, initMinimal)
+		config := generateConfig(projectName)
 
 		// Write config file
 		if err := os.WriteFile(configPath, []byte(config), 0644); err != nil {
@@ -56,7 +55,6 @@ var initCmd = &cobra.Command{
 
 func init() {
 	initCmd.Flags().BoolVarP(&initForce, "force", "f", false, "Overwrite existing config without confirmation")
-	initCmd.Flags().BoolVarP(&initMinimal, "minimal", "m", false, "Create minimal config without comments")
 }
 
 func getProjectName() string {
@@ -68,50 +66,12 @@ func getProjectName() string {
 	return "my-project"
 }
 
-func generateConfig(projectName string, minimal bool) string {
-	if minimal {
-		return fmt.Sprintf(`{
-  "fork": {
-    "name": "%s",
-    "exclude": ["*.log", ".DS_Store", "*.tmp", "*.swp"]
-  },
-  "run": {
-    "image": "worklet/base:latest",
-    "isolation": "full",
-    "initScript": ["echo 'Container started'"]
-  }
-}`, projectName)
-	}
+func generateConfig(projectName string) string {
 
 	return fmt.Sprintf(`{
   // Worklet configuration file
-  "fork": {
-    // Name for this fork (used in listings)
-    "name": "%s",
-    
-    // Description of what this fork is for
-    "description": "Development fork",
-    
-    // Include .git directory for full Git workflow (default: true)
-    "includeGit": true,
-    
-    // Patterns to exclude from fork
-    "exclude": [
-      "*.log",      // Log files
-      ".DS_Store",  // macOS metadata
-      "*.tmp",      // Temporary files
-      "*.swp"       // Vim swap files
-    ]
-  },
+  "name": "%s",
   "run": {
-    // Docker image to use (defaults to worklet/base:latest if not specified)
-    "image": "worklet/base:latest",
-    
-    // Isolation mode: "full" (default) or "shared"
-    // - "full": Runs a separate Docker daemon inside the container (true isolation)
-    // - "shared": Mounts host Docker socket (containers run on host)
-    "isolation": "full",
-    
     // Command to run in the container
     "command": ["sh"],
     
@@ -120,19 +80,13 @@ func generateConfig(projectName string, minimal bool) string {
     "initScript": [
       "echo 'Worklet container started'"
     ],
-    
     // Environment variables
     "environment": {
-      "DOCKER_TLS_CERTDIR": "",
-      "DOCKER_DRIVER": "overlay2"
     },
     
     // Additional volume mounts
     // Example: ["/host/path:/container/path", "volume-name:/data"]
     "volumes": [],
-    
-    // Run in privileged mode (required for "full" isolation mode)
-    "privileged": true
   }
 }`, projectName)
 }

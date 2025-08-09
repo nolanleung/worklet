@@ -1,6 +1,6 @@
 FROM docker:dind
 
-ENV NODE_VERSION 24.4.1
+ENV NODE_VERSION=24.4.1
 
 RUN addgroup -g 1000 node \
     && adduser -u 1000 -G node -s /bin/sh -D node \
@@ -78,7 +78,7 @@ RUN addgroup -g 1000 node \
   && npm --version \
   && rm -rf /tmp/*
 
-ENV YARN_VERSION 1.22.22
+ENV YARN_VERSION=1.22.22
 
 RUN apk add --no-cache --virtual .build-deps-yarn curl gnupg tar \
   # use pre-existing gpg directory, see https://github.com/nodejs/docker-node/pull/1895#issuecomment-1550389150
@@ -174,3 +174,10 @@ RUN corepack prepare pnpm@latest --activate
 ENV TERM=xterm-256color
 
 RUN bun add --global @anthropic-ai/claude-code
+
+# Install Python 3.12 and common tools
+RUN apk add --no-cache \
+    python3 \
+    python3-dev \
+    py3-pip \
+    py3-virtualenv

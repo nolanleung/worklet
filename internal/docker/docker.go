@@ -302,7 +302,7 @@ func buildCopyImage(workDir string, cfg *config.WorkletConfig, sessionID string)
 	if projectName == "" {
 		projectName = "worklet"
 	}
-	imageName := fmt.Sprintf("worklet-temp-%s-%s", projectName, sessionID)
+	imageName := fmt.Sprintf("worklet-temp-%s-%s", strings.ToLower(projectName), sessionID)
 
 	// Get base image
 	baseImage := cfg.Run.Image
