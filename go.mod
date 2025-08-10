@@ -3,6 +3,7 @@ module github.com/nolanleung/worklet
 go 1.23.5
 
 require (
+	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.6
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/docker/docker v28.3.2+incompatible
@@ -10,6 +11,7 @@ require (
 	github.com/go-git/go-git/v5 v5.16.2
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/mergestat/timediff v0.0.4
 	github.com/spf13/cobra v1.8.0
 	github.com/tidwall/jsonc v0.3.2
 	golang.org/x/term v0.33.0

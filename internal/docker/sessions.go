@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,15 +13,15 @@ import (
 
 // SessionInfo represents information about a worklet session container
 type SessionInfo struct {
-	SessionID    string            `json:"session_id"`
-	ProjectName  string            `json:"project_name"`
-	ContainerID  string            `json:"container_id"`
-	ContainerName string           `json:"container_name"`
-	WorkDir      string            `json:"workdir"`
-	Status       string            `json:"status"`
-	Services     []ServiceInfo     `json:"services"`
-	Labels       map[string]string `json:"labels"`
-	CreatedAt    time.Time        `json:"created_at"`
+	SessionID     string            `json:"session_id"`
+	ProjectName   string            `json:"project_name"`
+	ContainerID   string            `json:"container_id"`
+	ContainerName string            `json:"container_name"`
+	WorkDir       string            `json:"workdir"`
+	Status        string            `json:"status"`
+	Services      []ServiceInfo     `json:"services"`
+	Labels        map[string]string `json:"labels"`
+	CreatedAt     time.Time         `json:"created_at"`
 }
 
 // ListSessions returns all running worklet sessions discovered via Docker API
@@ -41,7 +42,7 @@ func listSessionsWithFilter(ctx context.Context, includesStopped bool) ([]Sessio
 		args = append(args, "-a")
 	}
 	args = append(args, "--filter", "label=worklet.session=true", "--format", "json")
-	
+
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	output, err := cmd.Output()
 	if err != nil {
@@ -50,19 +51,19 @@ func listSessionsWithFilter(ctx context.Context, includesStopped bool) ([]Sessio
 
 	var sessions []SessionInfo
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	
+
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
 
 		var container struct {
-			ID          string            `json:"ID"`
-			Names       string            `json:"Names"`
-			State       string            `json:"State"`
-			Status      string            `json:"Status"`
-			Labels      string            `json:"Labels"`
-			CreatedAt   string            `json:"CreatedAt"`
+			ID        string `json:"ID"`
+			Names     string `json:"Names"`
+			State     string `json:"State"`
+			Status    string `json:"Status"`
+			Labels    string `json:"Labels"`
+			CreatedAt string `json:"CreatedAt"`
 		}
 
 		if err := json.Unmarshal([]byte(line), &container); err != nil {
@@ -71,7 +72,7 @@ func listSessionsWithFilter(ctx context.Context, includesStopped bool) ([]Sessio
 
 		// Parse labels
 		labels := parseLabels(container.Labels)
-		
+
 		// Extract session info from labels
 		sessionID := labels["worklet.session.id"]
 		if sessionID == "" {
@@ -90,7 +91,9 @@ func listSessionsWithFilter(ctx context.Context, includesStopped bool) ([]Sessio
 
 		// Parse creation time
 		if container.CreatedAt != "" {
-			session.CreatedAt, _ = time.Parse(time.RFC3339, container.CreatedAt)
+			session.CreatedAt, _ = time.Parse("2006-01-02 15:04:05 -0700 MST", container.CreatedAt)
+		} else {
+			session.CreatedAt = time.Now() // Fallback to now if parsing fails
 		}
 
 		// Extract services from labels
@@ -250,4 +253,51 @@ func GetSessionDNSName(session SessionInfo, service ServiceInfo) string {
 		subdomain = service.Name
 	}
 	return fmt.Sprintf("http://%s.%s-%s.local.worklet.sh", subdomain, session.ProjectName, session.SessionID)
+}
+
+func TailLogs(ctx context.Context, containerID string, output chan<- string) error {
+	session, err := GetSessionInfo(ctx, containerID)
+	if err != nil {
+		return fmt.Errorf("failed to get session info: %w", err)
+	}
+
+	// Show last 10 lines and follow
+	cmd := exec.CommandContext(ctx, "docker", "logs", "--tail", "10", "-tf", session.ContainerID)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stdout pipe: %w", err)
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start log command: %w", err)
+	}
+
+	go func() {
+		defer close(output)
+
+		// Read from both stdout and stderr
+		stdoutScanner := bufio.NewScanner(stdout)
+		stderrScanner := bufio.NewScanner(stderr)
+
+		// Use a goroutine for stderr
+		go func() {
+			for stderrScanner.Scan() {
+				text := stderrScanner.Text()
+				output <- text
+			}
+		}()
+
+		// Read stdout in main goroutine
+		for stdoutScanner.Scan() {
+			text := stdoutScanner.Text()
+			output <- text
+		}
+	}()
+
+	return cmd.Wait()
 }

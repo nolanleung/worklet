@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/nolanleung/worklet/internal/projects"
 	"github.com/spf13/cobra"
@@ -21,38 +20,8 @@ var rootCmd = &cobra.Command{
 			// Non-interactive mode: show project list and instructions
 			return showNonInteractiveProjectList()
 		}
-		
-		// If no subcommand is provided, show the interactive project selector
-		selectedPath, action, err := ShowProjectSelector()
-		if err != nil {
-			// If the interactive selector fails, show non-interactive list
-			if strings.Contains(err.Error(), "could not open a new TTY") ||
-			   strings.Contains(err.Error(), "/dev/tty") {
-				return showNonInteractiveProjectList()
-			}
-			return err
-		}
-		
-		// Handle different actions
-		switch action {
-		case "background":
-			// Change to the selected directory
-			if err := os.Chdir(selectedPath); err != nil {
-				return fmt.Errorf("failed to change directory: %w", err)
-			}
-			// Start in background (all sessions are now detached)
-			return RunInDirectory(selectedPath)
-		case "attach":
-			// selectedPath contains the session ID for attach action
-			return AttachToContainer(selectedPath)
-		default:
-			// Change to the selected directory
-			if err := os.Chdir(selectedPath); err != nil {
-				return fmt.Errorf("failed to change directory: %w", err)
-			}
-			// Start new session (always detached)
-			return RunInDirectory(selectedPath)
-		}
+
+		return RunCLI()
 	},
 }
 
@@ -80,14 +49,14 @@ func isInteractiveTerminal() bool {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return false
 	}
-	
+
 	// Check if we can open /dev/tty (required for bubbletea)
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
 		return false
 	}
 	tty.Close()
-	
+
 	return true
 }
 
@@ -107,7 +76,7 @@ func showNonInteractiveProjectList() error {
 
 	fmt.Println("Worklet Projects:")
 	fmt.Println()
-	
+
 	for i, p := range projectList {
 		name := p.Name
 		if name == "" {
@@ -123,11 +92,11 @@ func showNonInteractiveProjectList() error {
 			break
 		}
 	}
-	
+
 	fmt.Println("\nTo run a project:")
 	fmt.Println("  cd <project-path> && worklet run")
 	fmt.Println("\nTo see all projects:")
 	fmt.Println("  worklet projects list")
-	
+
 	return nil
 }
