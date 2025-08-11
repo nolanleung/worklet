@@ -51,6 +51,8 @@ RUN corepack prepare yarn@stable --activate
 # Enable pnpm
 ENV PNPM_HOME="/pnpm"
 RUN corepack prepare pnpm@latest --activate
+# Add pnpm to PATH
+ENV PATH="${PNPM_HOME}:${PATH}"
 
 # Install Bun
 RUN curl -fsSL https://bun.sh/install | bash
@@ -67,3 +69,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install rust
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install claude code
+RUN pnpm add -g @anthropic-ai/claude-code

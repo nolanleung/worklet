@@ -94,7 +94,7 @@ func LoadConfigOrDetect(dir string, isClonedRepo bool) (*WorkletConfig, error) {
 			packageManager := DetectPackageManager(dir)
 			scriptName := defaultConfig.Run.Command[len(defaultConfig.Run.Command)-1]
 			if packageManager != "deno" {
-				fmt.Printf("No .worklet.jsonc found. Detected Node.js project, will run '%s install' then '%s run %s'\n", 
+				fmt.Printf("No .worklet.jsonc found. Detected Node.js project, will run '%s install' then '%s run %s'\n",
 					packageManager, packageManager, scriptName)
 			} else {
 				fmt.Printf("No .worklet.jsonc found. Detected Deno project, using 'deno task %s'\n", scriptName)

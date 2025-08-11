@@ -117,11 +117,11 @@ func CheckClaudeCredentials() (bool, error) {
 	// Run a container to check if credentials and config files exist
 	args := []string{
 		"run", "--rm",
-		"-v", fmt.Sprintf("%s:/claude-config:ro", ClaudeCredentialsVolume),
+		"-v", fmt.Sprintf("%s:/root/claude-config:ro", ClaudeCredentialsVolume),
 		"--entrypoint", "sh",
 		"alpine",
 		"-c",
-		"test -f /claude-config/.claude/credentials.json && test -f /claude-config/.claude.json && echo 'configured' || echo 'not configured'",
+		"test -f /claude-config/.credentials.json && echo 'configured' || echo 'not configured'",
 	}
 
 	cmd := exec.Command("docker", args...)
