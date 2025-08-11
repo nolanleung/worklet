@@ -161,17 +161,6 @@ func RunContainer(opts RunOptions) (string, error) {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
 	}
 
-	// Mount SSH authentication socket if available
-	if sshAuthSock := os.Getenv("SSH_AUTH_SOCK"); sshAuthSock != "" {
-		// Check if the socket file exists
-		if _, err := os.Stat(sshAuthSock); err == nil {
-			// Mount the SSH socket as read-only
-			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", sshAuthSock, sshAuthSock))
-			// Pass the environment variable
-			args = append(args, "-e", fmt.Sprintf("SSH_AUTH_SOCK=%s", sshAuthSock))
-		}
-	}
-
 	// Disable Corepack prompts for Node.js projects
 	args = append(args, "-e", "COREPACK_ENABLE_DOWNLOAD_PROMPT=0")
 

@@ -185,18 +185,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				term = "xterm-256color"
 			}
 
-			// Build docker exec arguments
-			execArgs := []string{"exec", "-it", "-e", "TERM=" + term}
-			
-			// Pass SSH_AUTH_SOCK if available
-			if sshAuthSock := os.Getenv("SSH_AUTH_SOCK"); sshAuthSock != "" {
-				execArgs = append(execArgs, "-e", "SSH_AUTH_SOCK="+sshAuthSock)
-			}
-			
-			execArgs = append(execArgs, session.ContainerID, "/bin/sh")
-
 			// Create the docker exec command
-			c := exec.Command("docker", execArgs...)
+			c := exec.Command("docker", "exec", "-it", "-e", "TERM="+term, session.ContainerID, "/bin/sh")
 
 			// Use tea.ExecProcess to temporarily leave bubbletea and run the shell
 			return m, tea.ExecProcess(c, func(err error) tea.Msg {
