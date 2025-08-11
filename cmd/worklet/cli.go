@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mergestat/timediff"
-	"github.com/nolanleung/worklet/cmd/worklet/cli"
 	"github.com/nolanleung/worklet/internal/docker"
 )
 
@@ -18,9 +18,7 @@ var baseStyle = lipgloss.NewStyle().
 	BorderForeground(lipgloss.Color("240"))
 
 type model struct {
-	table   table.Model
-	session *cli.SessionModel
-	view    string
+	table table.Model
 }
 
 // Init implements tea.Model.
@@ -83,29 +81,6 @@ func (m *model) refresh() {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
-	// Handle session view updates first
-	if m.view == "session" && m.session != nil {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "esc", "q":
-				m.view = ""
-				m.session = nil
-				m.refresh()
-				return m, nil
-			case "ctrl+c":
-				return m, tea.Quit
-			}
-		}
-
-		// Update the session model
-		var sessionModel tea.Model
-		sessionModel, cmd = m.session.Update(msg)
-		m.session = sessionModel.(*cli.SessionModel)
-		return m, cmd
-	}
-
-	// Handle main view updates
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -120,7 +95,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "enter":
-			// attach to the selected project
+			// attach to the selected project with direct terminal
 			if !m.table.Focused() {
 				return m, nil
 			}
@@ -133,13 +108,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			m.session = &cli.SessionModel{
-				SessionID: sessionID,
+			// Get session info to get container ID
+			session, err := docker.GetSessionInfo(context.Background(), sessionID)
+			if err != nil {
+				// Could not get session info, just return
+				return m, nil
 			}
-			m.view = "session"
 
-			// Initialize the session model
-			return m, m.session.Init()
+			// Get TERM from host environment
+			term := os.Getenv("TERM")
+			if term == "" {
+				term = "xterm-256color"
+			}
+
+			// Create the docker exec command
+			c := exec.Command("docker", "exec", "-it", "-e", "TERM="+term, session.ContainerID, "/bin/sh")
+
+			// Use tea.ExecProcess to temporarily leave bubbletea and run the shell
+			return m, tea.ExecProcess(c, func(err error) tea.Msg {
+				// After the shell exits, we return here
+				// Refresh the table in case container states changed
+				m.refresh()
+				return nil
+			})
+
 		}
 	}
 	m.table, cmd = m.table.Update(msg)
@@ -148,21 +140,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View implements tea.Model.
 func (m model) View() string {
-	switch m.view {
-	case "session":
-		if m.session != nil {
-			return m.session.View()
-		}
-		return "Loading session..."
-	default:
-		return baseStyle.Render(m.table.View()) + "\n"
-	}
+	helpText := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("241")).
+		Render("\nEnter: Attach to shell • Q: Quit")
+	return baseStyle.Render(m.table.View()) + helpText + "\n"
 }
 
 func RunCLI() error {
 	m := model{}
 	m.refresh()
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
 		os.Exit(1)

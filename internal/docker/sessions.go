@@ -184,8 +184,14 @@ func AttachToSession(ctx context.Context, sessionID string) error {
 		}
 	}
 
-	// Attach to the container
-	cmd := exec.Command("docker", "attach", session.ContainerID)
+	// Get TERM from host environment, or use a sensible default
+	term := os.Getenv("TERM")
+	if term == "" {
+		term = "xterm-256color"
+	}
+
+	// Use docker exec -it for a full interactive terminal experience with a new shell
+	cmd := exec.Command("docker", "exec", "-it", "-e", "TERM="+term, session.ContainerID, "/bin/sh")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -300,4 +306,33 @@ func TailLogs(ctx context.Context, containerID string, output chan<- string) err
 	}()
 
 	return cmd.Wait()
+}
+
+// ExecShell creates an interactive shell session in a container
+func ExecShell(ctx context.Context, sessionID string) (*exec.Cmd, error) {
+	session, err := GetSessionInfo(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session info: %w", err)
+	}
+
+	// Check if container is running
+	if session.Status != "running" {
+		// Start the container if it's not running
+		startCmd := exec.CommandContext(ctx, "docker", "start", session.ContainerID)
+		if err := startCmd.Run(); err != nil {
+			return nil, fmt.Errorf("failed to start container: %w", err)
+		}
+	}
+
+	// Get TERM from host environment, or use a sensible default
+	term := os.Getenv("TERM")
+	if term == "" {
+		term = "xterm-256color"
+	}
+
+	// Create an interactive shell command without -t flag (PTY will handle this)
+	// Using -i flag for interactive input and -e to set TERM environment variable
+	cmd := exec.CommandContext(ctx, "docker", "exec", "-i", "-e", "TERM="+term, session.ContainerID, "/bin/sh")
+	
+	return cmd, nil
 }
