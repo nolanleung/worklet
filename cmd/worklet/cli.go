@@ -47,10 +47,21 @@ func (m *model) refresh() {
 		if name == "" {
 			name = "(no name)"
 		}
+		
+		// Build URL if services exist
+		url := "(no services)"
+		if len(session.Services) > 0 {
+			subdomain := session.Services[0].Subdomain
+			if subdomain == "" {
+				subdomain = session.Services[0].Name
+			}
+			url = fmt.Sprintf("http://%s.%s-%s.local.worklet.sh", subdomain, session.ProjectName, session.SessionID)
+		}
+		
 		rows = append(rows, table.Row{
 			name,
 			session.SessionID,
-			"http://" + session.Services[0].Subdomain + "." + session.ProjectName + "-" + session.SessionID + ".local.worklet.sh",
+			url,
 			timediff.TimeDiff(session.CreatedAt),
 		})
 	}
@@ -94,6 +105,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 
+		case "o", "O":
+			// open browser with the service URL
+			if !m.table.Focused() {
+				return m, nil
+			}
+			selected := m.table.SelectedRow()
+			if len(selected) == 0 {
+				return m, nil
+			}
+			
+			// Get the URL from the table (3rd column)
+			url := selected[2]
+			if url == "" || url == "(no services)" {
+				// No services or URL available
+				return m, nil
+			}
+
+			// Open the URL in the default browser
+			openBrowserURL(url)
+			return m, nil
+
+		case "l", "L":
+			// tail logs of the selected session
+			if !m.table.Focused() {
+				return m, nil
+			}
+			selected := m.table.SelectedRow()
+			if len(selected) == 0 {
+				return m, nil
+			}
+			sessionID := selected[1]
+			if sessionID == "" {
+				return m, nil
+			}
+
+			// Get session info to get container ID
+			session, err := docker.GetSessionInfo(context.Background(), sessionID)
+			if err != nil {
+				// Could not get session info, just return
+				return m, nil
+			}
+
+			// Create the docker logs command to tail logs
+			c := exec.Command("docker", "logs", "--tail", "50", "-f", session.ContainerID)
+
+			// Use tea.ExecProcess to temporarily leave bubbletea and run the logs command
+			return m, tea.ExecProcess(c, func(err error) tea.Msg {
+				// After viewing logs, we return here
+				// Refresh the table in case container states changed
+				m.refresh()
+				return nil
+			})
+
 		case "enter":
 			// attach to the selected project with direct terminal
 			if !m.table.Focused() {
@@ -121,8 +185,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				term = "xterm-256color"
 			}
 
+			// Build docker exec arguments
+			execArgs := []string{"exec", "-it", "-e", "TERM=" + term}
+			
+			// Pass SSH_AUTH_SOCK if available
+			if sshAuthSock := os.Getenv("SSH_AUTH_SOCK"); sshAuthSock != "" {
+				execArgs = append(execArgs, "-e", "SSH_AUTH_SOCK="+sshAuthSock)
+			}
+			
+			execArgs = append(execArgs, session.ContainerID, "/bin/sh")
+
 			// Create the docker exec command
-			c := exec.Command("docker", "exec", "-it", "-e", "TERM="+term, session.ContainerID, "/bin/sh")
+			c := exec.Command("docker", execArgs...)
 
 			// Use tea.ExecProcess to temporarily leave bubbletea and run the shell
 			return m, tea.ExecProcess(c, func(err error) tea.Msg {
@@ -142,7 +216,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	helpText := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("241")).
-		Render("\nEnter: Attach to shell • Q: Quit")
+		Render("\nEnter: Attach to shell • O: Open in browser • L: View logs • Q: Quit")
 	return baseStyle.Render(m.table.View()) + helpText + "\n"
 }
 

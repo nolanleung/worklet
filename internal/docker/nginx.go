@@ -356,6 +356,70 @@ func (nm *NginxManager) GetConfigPath() string {
 	return filepath.Join(nm.configPath, nginxConfigFile)
 }
 
+// IsHealthy checks if the nginx container is running and healthy
+func (nm *NginxManager) IsHealthy(ctx context.Context) (bool, error) {
+	exists, running, err := nm.containerStatus(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to check container status: %w", err)
+	}
+
+	if !exists || !running {
+		return false, nil
+	}
+
+	// Check if nginx process is responding by testing config
+	exec, err := nm.client.ContainerExecCreate(ctx, nginxContainerName, container.ExecOptions{
+		Cmd:          []string{"nginx", "-t"},
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to create exec for health check: %w", err)
+	}
+
+	// Attach to exec
+	attach, err := nm.client.ContainerExecAttach(ctx, exec.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return false, fmt.Errorf("failed to attach to exec: %w", err)
+	}
+	defer attach.Close()
+
+	// Start the exec
+	if err := nm.client.ContainerExecStart(ctx, exec.ID, container.ExecStartOptions{}); err != nil {
+		return false, fmt.Errorf("failed to start health check: %w", err)
+	}
+
+	// Read output
+	_, _ = io.ReadAll(attach.Reader)
+
+	// Inspect exec to check exit code
+	inspectResp, err := nm.client.ContainerExecInspect(ctx, exec.ID)
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect exec: %w", err)
+	}
+
+	// nginx -t returns 0 if config is valid and nginx is healthy
+	return inspectResp.ExitCode == 0, nil
+}
+
+// Restart restarts the nginx container with current configuration
+func (nm *NginxManager) Restart(ctx context.Context) error {
+	log.Printf("Restarting nginx proxy container...")
+	
+	// Stop and remove existing container
+	if err := nm.Remove(ctx); err != nil {
+		return fmt.Errorf("failed to remove existing container: %w", err)
+	}
+	
+	// Start fresh container
+	if err := nm.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start new container: %w", err)
+	}
+	
+	log.Printf("nginx proxy container restarted successfully")
+	return nil
+}
+
 // pullImage pulls a Docker image if it doesn't exist locally
 func pullImage(ctx context.Context, cli *client.Client, imageName string) error {
 	// Check if image exists locally

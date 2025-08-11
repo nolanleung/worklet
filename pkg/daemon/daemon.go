@@ -144,6 +144,9 @@ func (d *Daemon) Start() error {
 			log.Printf("Failed to start nginx proxy: %v", err)
 		} else {
 			log.Printf("Started nginx proxy container")
+			
+			// Start nginx health check goroutine
+			go d.startNginxHealthCheck()
 		}
 	}
 	
@@ -1165,6 +1168,70 @@ func (d *Daemon) startPeriodicDiscovery() {
 			}
 		case <-d.ctx.Done():
 			debugLog("Stopping periodic discovery")
+			return
+		}
+	}
+}
+
+// startNginxHealthCheck periodically checks nginx health and restarts if needed
+func (d *Daemon) startNginxHealthCheck() {
+	if d.nginxManager == nil {
+		return
+	}
+	
+	// Initial delay to let nginx start properly
+	time.Sleep(10 * time.Second)
+	
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	
+	var consecutiveFailures int
+	const maxConsecutiveFailures = 3
+	
+	for {
+		select {
+		case <-ticker.C:
+			// Check if nginx is healthy
+			healthy, err := d.nginxManager.IsHealthy(d.ctx)
+			if err != nil {
+				log.Printf("nginx health check error: %v", err)
+				consecutiveFailures++
+			} else if !healthy {
+				log.Printf("nginx proxy is not healthy, attempting to restart...")
+				consecutiveFailures++
+				
+				// Attempt to restart nginx
+				if err := d.nginxManager.Restart(d.ctx); err != nil {
+					log.Printf("Failed to restart nginx: %v", err)
+					
+					// If we've failed too many times, wait longer before retrying
+					if consecutiveFailures >= maxConsecutiveFailures {
+						log.Printf("nginx has failed %d consecutive health checks, backing off for 1 minute", consecutiveFailures)
+						time.Sleep(1 * time.Minute)
+						consecutiveFailures = 0 // Reset counter after backoff
+					}
+				} else {
+					log.Printf("nginx proxy restarted successfully")
+					
+					// Update configuration after restart
+					d.updateNginxConfig()
+					
+					// Ensure nginx is connected to all networks
+					if err := d.nginxManager.EnsureConnectedToAllNetworks(d.ctx); err != nil {
+						log.Printf("Warning: failed to connect nginx to all networks after restart: %v", err)
+					}
+					
+					consecutiveFailures = 0 // Reset on successful restart
+				}
+			} else {
+				// nginx is healthy, reset failure counter
+				if consecutiveFailures > 0 {
+					debugLog("nginx is healthy again, resetting failure counter")
+					consecutiveFailures = 0
+				}
+			}
+		case <-d.ctx.Done():
+			log.Printf("Stopping nginx health check")
 			return
 		}
 	}
