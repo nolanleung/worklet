@@ -319,6 +319,32 @@ func (c *Client) RequestForkID(ctx context.Context) (string, error) {
 	return idResp.ForkID, nil
 }
 
+// GetVersion returns the version information of the running daemon
+func (c *Client) GetVersion(ctx context.Context) (*GetVersionResponse, error) {
+	msg := Message{
+		Type: MsgGetVersion,
+		ID:   uuid.New().String(),
+	}
+	
+	resp, err := c.sendRequest(ctx, &msg)
+	if err != nil {
+		return nil, err
+	}
+	
+	if resp.Type == MsgError {
+		var errResp ErrorResponse
+		json.Unmarshal(resp.Payload, &errResp)
+		return nil, fmt.Errorf("daemon error: %s", errResp.Error)
+	}
+	
+	var versionResp GetVersionResponse
+	if err := json.Unmarshal(resp.Payload, &versionResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	
+	return &versionResp, nil
+}
+
 // IsDaemonRunning checks if the daemon is running
 func IsDaemonRunning(socketPath string) bool {
 	client := NewClient(socketPath)

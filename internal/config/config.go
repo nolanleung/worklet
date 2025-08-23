@@ -31,6 +31,7 @@ type RunConfig struct {
 
 type CredentialConfig struct {
 	Claude bool `json:"claude,omitempty"` // Mount Claude credentials volume
+	SSH    bool `json:"ssh,omitempty"`    // Mount SSH credentials volume
 }
 
 type ServiceConfig struct {

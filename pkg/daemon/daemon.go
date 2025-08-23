@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/nolanleung/worklet/internal/docker"
 	"github.com/nolanleung/worklet/internal/nginx"
+	"github.com/nolanleung/worklet/internal/version"
 )
 
 var debugMode = os.Getenv("WORKLET_DEBUG") == "true"
@@ -43,6 +44,7 @@ type Daemon struct {
 	stateFile    string
 	pidFile      string
 	nginxManager *docker.NginxManager
+	startTime    time.Time
 	
 	// Cache for container information
 	forksCache      []ForkInfo
@@ -76,6 +78,7 @@ func NewDaemon(socketPath string) *Daemon {
 		stateFile:    stateFile,
 		pidFile:      pidFile,
 		nginxManager: nginxManager,
+		startTime:    time.Now(),
 		forksCacheTTL: 5 * time.Second, // Cache TTL of 5 seconds
 	}
 }
@@ -259,6 +262,8 @@ func (d *Daemon) handleMessage(msg *Message) *Message {
 		}
 	case MsgTriggerDiscovery:
 		return d.handleTriggerDiscovery(msg)
+	case MsgGetVersion:
+		return d.handleGetVersion(msg)
 	default:
 		return &Message{
 			Type: MsgError,
@@ -503,6 +508,21 @@ func (d *Daemon) handleRequestForkID(msg *Message) *Message {
 		ID:   msg.ID,
 		Payload: mustMarshal(RequestForkIDResponse{
 			ForkID: forkID,
+		}),
+	}
+}
+
+func (d *Daemon) handleGetVersion(msg *Message) *Message {
+	versionInfo := version.GetInfo()
+	
+	return &Message{
+		Type: MsgVersion,
+		ID:   msg.ID,
+		Payload: mustMarshal(GetVersionResponse{
+			Version:   versionInfo.Version,
+			BuildTime: versionInfo.BuildTime,
+			GitCommit: versionInfo.GitCommit,
+			StartTime: d.startTime.Format(time.RFC3339),
 		}),
 	}
 }

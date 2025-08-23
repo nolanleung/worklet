@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nolanleung/worklet/internal/version"
 	"github.com/nolanleung/worklet/pkg/daemon"
 	"github.com/spf13/cobra"
 )
@@ -63,10 +64,12 @@ var daemonRefreshCmd = &cobra.Command{
 
 var (
 	daemonForeground bool
+	daemonForceStart bool
 )
 
 func init() {
 	daemonStartCmd.Flags().BoolVar(&daemonForeground, "foreground", false, "Run daemon in foreground")
+	daemonStartCmd.Flags().BoolVar(&daemonForceStart, "force", false, "Force start daemon even if another version is running")
 
 	daemonCmd.AddCommand(daemonStartCmd)
 	daemonCmd.AddCommand(daemonStopCmd)
@@ -81,7 +84,62 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 
 	// Check if daemon is already running
 	if daemon.IsDaemonRunning(socketPath) {
-		return fmt.Errorf("daemon is already running")
+		if !daemonForceStart {
+			// Check version of running daemon
+			client := daemon.NewClient(socketPath)
+			if err := client.Connect(); err == nil {
+				defer client.Close()
+				
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				
+				if versionInfo, err := client.GetVersion(ctx); err == nil {
+					currentVersion := version.GetInfo().Version
+					runningVersion := versionInfo.Version
+					
+					fmt.Printf("Daemon is already running (version %s)\n", runningVersion)
+					
+					// Compare versions
+					comparison := version.CompareVersions(currentVersion, runningVersion)
+					
+					if comparison > 0 {
+						// Current version is newer
+						fmt.Printf("Current version (%s) is newer than running version (%s)\n", currentVersion, runningVersion)
+						fmt.Println("Shutting down older daemon...")
+						
+						// Stop the old daemon
+						if err := runDaemonStop(cmd, args); err != nil {
+							return fmt.Errorf("failed to stop older daemon: %w", err)
+						}
+						
+						// Wait a moment for cleanup
+						time.Sleep(2 * time.Second)
+						
+						// Continue with starting new daemon
+						fmt.Println("Starting new daemon...")
+					} else if comparison == 0 {
+						// Same version
+						return fmt.Errorf("daemon with same version (%s) is already running", runningVersion)
+					} else {
+						// Running version is newer
+						return fmt.Errorf("daemon with newer version (%s) is already running (current: %s)", runningVersion, currentVersion)
+					}
+				} else {
+					// Could not get version, but daemon is running
+					return fmt.Errorf("daemon is already running (could not determine version)")
+				}
+			} else {
+				// Could not connect to daemon
+				return fmt.Errorf("daemon appears to be running but cannot connect")
+			}
+		} else {
+			// Force start - stop existing daemon
+			fmt.Println("Force starting: stopping existing daemon...")
+			if err := runDaemonStop(cmd, args); err != nil {
+				fmt.Printf("Warning: failed to stop existing daemon: %v\n", err)
+			}
+			time.Sleep(2 * time.Second)
+		}
 	}
 
 	if daemonForeground {

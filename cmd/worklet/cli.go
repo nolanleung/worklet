@@ -17,22 +17,60 @@ var baseStyle = lipgloss.NewStyle().
 	BorderStyle(lipgloss.NormalBorder()).
 	BorderForeground(lipgloss.Color("240"))
 
+// max returns the maximum of two integers
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 type model struct {
-	table table.Model
+	table  table.Model
+	width  int
+	height int
 }
 
 // Init implements tea.Model.
 func (m model) Init() tea.Cmd {
-	return nil
+	// Request initial window size
+	return tea.EnterAltScreen
 }
 
 // Init implements tea.Model.
 func (m *model) refresh() {
+	// Calculate dynamic column widths based on terminal width
+	// Default to 120 if width not yet set
+	termWidth := m.width
+	if termWidth == 0 {
+		termWidth = 120
+	}
+
+	// Reserve space for borders and padding (approximately 10 chars)
+	availableWidth := termWidth - 10
+	if availableWidth < 80 {
+		availableWidth = 80 // Minimum usable width
+	}
+
+	// Calculate proportional widths
+	// Approximate ratios: Project(15%), SessionID(20%), URL(50%), Created(15%)
+	projectWidth := max(12, availableWidth*15/100)
+	sessionWidth := max(16, availableWidth*20/100)
+	urlWidth := max(30, availableWidth*50/100)
+	createdWidth := max(10, availableWidth*15/100)
+
+	// Adjust to fit exactly
+	totalWidth := projectWidth + sessionWidth + urlWidth + createdWidth
+	if totalWidth < availableWidth {
+		// Add extra space to URL column
+		urlWidth += availableWidth - totalWidth
+	}
+
 	columns := []table.Column{
-		{Title: "Project", Width: 16},
-		{Title: "Session ID", Width: 20},
-		{Title: "URL", Width: 48},
-		{Title: "Created", Width: 12},
+		{Title: "Project", Width: projectWidth},
+		{Title: "Session ID", Width: sessionWidth},
+		{Title: "URL", Width: urlWidth},
+		{Title: "Created", Width: createdWidth},
 	}
 
 	sessions, err := docker.ListSessions(context.Background())
@@ -66,11 +104,18 @@ func (m *model) refresh() {
 		})
 	}
 
+	// Calculate table height based on terminal height
+	tableHeight := 10
+	if m.height > 15 {
+		// Use most of the terminal height, leaving room for borders and help text
+		tableHeight = m.height - 5
+	}
+
 	t := table.New(
 		table.WithColumns(columns),
 		table.WithRows(rows),
 		table.WithFocused(true),
-		table.WithHeight(10),
+		table.WithHeight(tableHeight),
 	)
 
 	s := table.DefaultStyles()
@@ -93,6 +138,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		// Update terminal dimensions
+		m.width = msg.Width
+		m.height = msg.Height
+		// Refresh the table with new dimensions
+		m.refresh()
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
@@ -204,16 +257,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View implements tea.Model.
 func (m model) View() string {
+	// Make the border width responsive to terminal width
+	tableView := m.table.View()
+	
+	// Apply border styling with dynamic width
+	if m.width > 0 {
+		// Adjust border to terminal width
+		styledTable := baseStyle.
+			Width(m.width - 2). // Account for terminal padding
+			Render(tableView)
+		
+		helpText := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			Width(m.width - 2).
+			Render("\nEnter: Attach to shell • O: Open in browser • L: View logs • Q: Quit")
+		
+		return styledTable + helpText + "\n"
+	}
+	
+	// Fallback for when dimensions aren't set yet
 	helpText := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("241")).
 		Render("\nEnter: Attach to shell • O: Open in browser • L: View logs • Q: Quit")
-	return baseStyle.Render(m.table.View()) + helpText + "\n"
+	return baseStyle.Render(tableView) + helpText + "\n"
 }
 
 func RunCLI() error {
 	m := model{}
 	m.refresh()
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
 		os.Exit(1)

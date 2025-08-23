@@ -20,6 +20,7 @@ const (
 	MsgRefreshAll       MessageType = "REFRESH_ALL"
 	MsgRequestForkID    MessageType = "REQUEST_FORK_ID"
 	MsgTriggerDiscovery MessageType = "TRIGGER_DISCOVERY"
+	MsgGetVersion       MessageType = "GET_VERSION"
 	
 	// Daemon -> Client responses
 	MsgSuccess        MessageType = "SUCCESS"
@@ -27,6 +28,7 @@ const (
 	MsgForkList       MessageType = "FORK_LIST"
 	MsgForkInfo       MessageType = "FORK_INFO"
 	MsgForkID         MessageType = "FORK_ID"
+	MsgVersion        MessageType = "VERSION"
 )
 
 // Message represents a message between client and daemon
@@ -104,4 +106,12 @@ type RefreshAllRequest struct {
 // RequestForkIDResponse contains the next available fork ID
 type RequestForkIDResponse struct {
 	ForkID string `json:"fork_id"`
+}
+
+// GetVersionResponse contains version information
+type GetVersionResponse struct {
+	Version   string `json:"version"`
+	BuildTime string `json:"build_time,omitempty"`
+	GitCommit string `json:"git_commit,omitempty"`
+	StartTime string `json:"start_time,omitempty"`
 }

@@ -41,6 +41,8 @@ func init() {
 	rootCmd.AddCommand(forksCmd)
 	rootCmd.AddCommand(projectsCmd)
 	rootCmd.AddCommand(daemonCmd)
+	rootCmd.AddCommand(sshCmd)
+	rootCmd.AddCommand(versionCmd)
 }
 
 // isInteractiveTerminal checks if we're running in an interactive terminal

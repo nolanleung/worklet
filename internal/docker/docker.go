@@ -190,11 +190,22 @@ func RunContainer(opts RunOptions) (string, error) {
 		initScripts = append(initScripts, opts.Config.Run.InitScript...)
 	}
 
-	// Add credential init script if needed
-	if opts.Config.Run.Credentials != nil && opts.Config.Run.Credentials.Claude {
-		if credInitScript := GetCredentialInitScript(true); credInitScript != "" {
-			// Prepend credential setup to ensure it runs first
-			initScripts = append([]string{credInitScript}, initScripts...)
+	// Add credential init scripts if needed
+	if opts.Config.Run.Credentials != nil {
+		// Add Claude credential init script
+		if opts.Config.Run.Credentials.Claude {
+			if credInitScript := GetCredentialInitScript(true); credInitScript != "" {
+				// Prepend credential setup to ensure it runs first
+				initScripts = append([]string{credInitScript}, initScripts...)
+			}
+		}
+		
+		// Add SSH credential init script
+		if opts.Config.Run.Credentials.SSH {
+			if sshInitScript := GetSSHInitScript(true); sshInitScript != "" {
+				// Prepend SSH setup to ensure it runs early
+				initScripts = append([]string{sshInitScript}, initScripts...)
+			}
 		}
 	}
 
@@ -219,9 +230,18 @@ func RunContainer(opts RunOptions) (string, error) {
 	}
 
 	// Add credential volumes if configured
-	if opts.Config.Run.Credentials != nil && opts.Config.Run.Credentials.Claude {
-		credentialMounts := GetCredentialVolumeMounts(true)
-		args = append(args, credentialMounts...)
+	if opts.Config.Run.Credentials != nil {
+		// Mount Claude credentials
+		if opts.Config.Run.Credentials.Claude {
+			credentialMounts := GetCredentialVolumeMounts(true)
+			args = append(args, credentialMounts...)
+		}
+		
+		// Mount SSH credentials
+		if opts.Config.Run.Credentials.SSH {
+			sshMounts := GetSSHVolumeMounts(true)
+			args = append(args, sshMounts...)
+		}
 	}
 
 	// Add image (use temporary image in copy mode, configured image in mount mode)
