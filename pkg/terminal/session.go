@@ -254,6 +254,12 @@ func (s *Session) readFromWebSocket(conn *websocket.Conn) {
 						}
 					}
 					continue
+				} else if msg["type"] == "command" {
+					// Handle special commands
+					if cmd, ok := msg["command"].(string); ok {
+						s.handleCommand(cmd, conn)
+					}
+					continue
 				}
 			}
 		}
@@ -275,6 +281,29 @@ func (s *Session) resize(rows, cols int) error {
 		Height: uint(rows),
 		Width:  uint(cols),
 	})
+}
+
+func (s *Session) handleCommand(cmd string, conn *websocket.Conn) {
+	switch cmd {
+	case "vscode":
+		// Launch VSCode with the container
+		if err := LaunchVSCode(s.ContainerID); err != nil {
+			errMsg := fmt.Sprintf("\r\n\033[31mFailed to launch VSCode: %v\033[0m\r\n", err)
+			conn.WriteMessage(websocket.BinaryMessage, []byte(errMsg))
+		} else {
+			successMsg := "\r\n\033[32mLaunching VSCode with your extensions...\033[0m\r\n"
+			conn.WriteMessage(websocket.BinaryMessage, []byte(successMsg))
+		}
+	case "info":
+		// Show container information
+		info := fmt.Sprintf("\r\n\033[36mContainer Info:\033[0m\r\n  ID: %s\r\n  Fork: %s\r\n  Session: %s\r\n", 
+			s.ContainerID[:12], s.ForkID, s.ID[:8])
+		conn.WriteMessage(websocket.BinaryMessage, []byte(info))
+	case "help":
+		// Show available commands
+		help := "\r\n\033[36mAvailable Commands:\033[0m\r\n  [s] Open in VSCode (with your extensions)\r\n  [i] Container Info\r\n  [h] Show Help\r\n"
+		conn.WriteMessage(websocket.BinaryMessage, []byte(help))
+	}
 }
 
 func (s *Session) AddConnection(conn *websocket.Conn) {

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/nolanleung/worklet/internal/config"
@@ -272,6 +273,22 @@ func RunContainer(opts RunOptions) (string, error) {
 	if containerID == "" {
 		return "", fmt.Errorf("failed to get container ID from docker run output")
 	}
+
+	// Set up devcontainer configuration for VSCode support
+	projectName = opts.Config.Name
+	if projectName == "" {
+		projectName = "worklet"
+	}
+	
+	// Generate and write devcontainer.json (non-blocking, best effort)
+	go func() {
+		// Small delay to ensure container is fully started
+		time.Sleep(1 * time.Second)
+		if err := EnsureDevContainerConfig(containerID, projectName); err != nil {
+			// Log warning but don't fail - VSCode will still work without it
+			fmt.Printf("Note: Could not set up VSCode extensions auto-sync: %v\n", err)
+		}
+	}()
 
 	return containerID, nil
 }

@@ -100,6 +100,7 @@ func runTerminal(cmd *cobra.Command, args []string) error {
 	url := fmt.Sprintf("http://localhost:%d", terminalPort)
 	fmt.Printf("Starting terminal server on %s\n", url)
 	fmt.Printf("CORS origin: %s\n", terminalCORSOrigin)
+	fmt.Println("\n💡 Tip: Press 's' in the terminal to open the session in VSCode")
 
 	// Open browser if requested
 	if openBrowser {

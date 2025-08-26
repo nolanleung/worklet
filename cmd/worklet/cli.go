@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mergestat/timediff"
 	"github.com/nolanleung/worklet/internal/docker"
+	"github.com/nolanleung/worklet/pkg/terminal"
 )
 
 var baseStyle = lipgloss.NewStyle().
@@ -211,6 +212,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return nil
 			})
 
+		case "c", "C":
+			// open the selected session in VSCode
+			if !m.table.Focused() {
+				return m, nil
+			}
+			selected := m.table.SelectedRow()
+			if len(selected) == 0 {
+				return m, nil
+			}
+			sessionID := selected[1]
+			if sessionID == "" {
+				return m, nil
+			}
+
+			// Get session info to get container ID
+			session, err := docker.GetSessionInfo(context.Background(), sessionID)
+			if err != nil {
+				// Could not get session info, just return
+				return m, nil
+			}
+
+			// Launch VSCode with the container
+			if err := terminal.LaunchVSCode(session.ContainerID); err != nil {
+				// VSCode launch failed, but don't crash the TUI
+				// The error is likely that VSCode is not installed
+				return m, nil
+			}
+			return m, nil
+
 		case "enter":
 			// attach to the selected project with direct terminal
 			if !m.table.Focused() {
@@ -270,7 +300,7 @@ func (m model) View() string {
 		helpText := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241")).
 			Width(m.width - 2).
-			Render("\nEnter: Attach to shell • O: Open in browser • L: View logs • Q: Quit")
+			Render("\nEnter: Attach to shell • O: Open in browser • C: Open in VSCode • L: View logs • Q: Quit")
 		
 		return styledTable + helpText + "\n"
 	}
@@ -278,7 +308,7 @@ func (m model) View() string {
 	// Fallback for when dimensions aren't set yet
 	helpText := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("241")).
-		Render("\nEnter: Attach to shell • O: Open in browser • L: View logs • Q: Quit")
+		Render("\nEnter: Attach to shell • O: Open in browser • C: Open in VSCode • L: View logs • Q: Quit")
 	return baseStyle.Render(tableView) + helpText + "\n"
 }
 

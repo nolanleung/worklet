@@ -124,9 +124,49 @@ function connectToFork() {
     // Handle terminal input
     terminal.onData((data) => {
         if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(data);
+            // Check for special keyboard shortcuts
+            if (data === 's' || data === 'S') {
+                // Open in VSCode
+                socket.send(JSON.stringify({
+                    type: 'command',
+                    command: 'vscode'
+                }));
+            } else if (data === 'i' || data === 'I') {
+                // Show container info
+                socket.send(JSON.stringify({
+                    type: 'command',
+                    command: 'info'
+                }));
+            } else if (data === 'h' || data === 'H') {
+                // Show help
+                socket.send(JSON.stringify({
+                    type: 'command',
+                    command: 'help'
+                }));
+            } else {
+                // Regular terminal input
+                socket.send(data);
+            }
         }
     });
+    
+    // Show keyboard shortcuts hint
+    showShortcutsHint();
+}
+
+// Show keyboard shortcuts hint
+function showShortcutsHint() {
+    // Check if hint bar already exists
+    if (!document.getElementById('shortcuts-hint')) {
+        const hintBar = document.createElement('div');
+        hintBar.id = 'shortcuts-hint';
+        hintBar.innerHTML = `
+            <span class="shortcut"><kbd>s</kbd> Open in VSCode</span>
+            <span class="shortcut"><kbd>i</kbd> Container Info</span>
+            <span class="shortcut"><kbd>h</kbd> Help</span>
+        `;
+        document.body.appendChild(hintBar);
+    }
 }
 
 // Show message in terminal container

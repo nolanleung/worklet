@@ -42,6 +42,7 @@ func init() {
 	rootCmd.AddCommand(projectsCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(sshCmd)
+	rootCmd.AddCommand(codeCmd)
 	rootCmd.AddCommand(versionCmd)
 }
 
