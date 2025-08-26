@@ -27,6 +27,9 @@ worklet run --mount
 
 # Run a specific command
 worklet run npm test
+
+# Open interactive session manager
+worklet
 ```
 
 ## Installation
@@ -66,11 +69,18 @@ Run your project in a clean Docker container with one command. Each session is i
 - Access services via `service.project-name.worklet.sh`
 - Built-in proxy server for local development
 
+### 💻 **VSCode Integration**
+- Open containers directly in VSCode with Dev Containers extension
+- Automatic devcontainer.json generation with your extensions
+- Seamless development experience with full IDE support
+
 ### 🔌 **Self-Contained Binary**
 The worklet binary includes all necessary scripts. No external dependencies beyond Docker.
 
-### 🚀 **Init Scripts**
-Run initialization commands automatically when containers start - perfect for installing dependencies, setting up tools, or configuring the environment.
+### 🚀 **Init Scripts & SSH Support**
+- Run initialization commands automatically when containers start
+- Mount SSH credentials for Git operations inside containers
+- Support for private repositories and SSH-based workflows
 
 
 ## Configuration
@@ -98,8 +108,10 @@ Create a `.worklet.jsonc` file in your repository root:
       "echo 'Welcome to Worklet!'"
     ],
     "credentials": {
-      "claude": true                 // Mount Claude credentials if available
-    }
+      "claude": true,                // Mount Claude credentials if available
+      "ssh": true                    // Mount SSH credentials for Git operations
+    },
+    "composePath": "docker-compose.yml"  // Path to docker-compose file (optional)
   },
   "services": [                      // Services exposed by your project
     {
@@ -118,6 +130,19 @@ Create a `.worklet.jsonc` file in your repository root:
 
 ## Command Reference
 
+### `worklet`
+Launch interactive session manager to view and manage all active worklet sessions.
+
+```bash
+worklet                         # Open interactive CLI
+# Features:
+# - View all active sessions with project info
+# - Connect to sessions (Enter key)
+# - Open in VSCode (v key)
+# - Delete sessions (d key)
+# - Refresh view (r key)
+```
+
 ### `worklet init`
 Initialize a new `.worklet.jsonc` configuration file.
 
@@ -135,6 +160,14 @@ worklet run --mount              # Run with current directory mounted
 worklet run --temp               # Run in temporary environment
 worklet run npm test             # Run specific command
 worklet run --mount npm start    # Run with mount and command
+
+# Terminal server options
+worklet run --no-terminal        # Disable terminal server
+worklet run --open-terminal      # Auto-open terminal in browser
+worklet run --terminal-port 8080 # Use custom terminal port
+
+# Credential options
+worklet run --link-claude        # Auto-link Claude credentials (default for cloned repos)
 ```
 
 ### `worklet terminal`
@@ -183,6 +216,67 @@ The daemon:
 - Manages session registrations via Unix socket at `~/.worklet/worklet.sock`
 - Enables automatic service discovery
 - Persists session state across daemon restarts
+
+### `worklet ssh`
+Manage SSH credentials for use inside worklet containers.
+
+```bash
+worklet ssh setup               # Copy SSH keys to Docker volume
+worklet ssh status              # Check SSH setup and test GitHub connectivity
+```
+
+This allows Git operations with private repositories to work seamlessly inside containers.
+
+### `worklet cleanup`
+Clean up orphaned Docker resources from worklet sessions.
+
+```bash
+worklet cleanup                 # Clean up orphaned resources (preserves pnpm volumes)
+worklet cleanup --force         # Clean up ALL orphaned resources
+```
+
+### `worklet code`
+Open a worklet session in VSCode using the Dev Containers extension.
+
+```bash
+worklet code                    # Open most recent session in VSCode
+worklet code abc123             # Open specific session in VSCode
+```
+
+VSCode must be installed with the Dev Containers extension enabled.
+
+### `worklet version`
+Show version information for the worklet CLI and daemon.
+
+```bash
+worklet version                 # Show CLI and daemon versions
+worklet daemon version           # Show daemon version only
+```
+
+### `worklet refresh`
+Refresh session information to update service discovery.
+
+```bash
+worklet refresh                 # Refresh current session
+worklet refresh abc123          # Refresh specific session
+worklet refresh --all           # Refresh all active sessions
+```
+
+### `worklet forks`
+List all active worklet sessions with their accessible DNS names.
+
+```bash
+worklet forks                   # List all active sessions with service URLs
+worklet forks --debug          # Show debug information
+```
+
+### `worklet projects`
+Manage worklet project history and settings.
+
+```bash
+worklet projects list           # List all projects in history
+worklet projects clean          # Clean up project history
+```
 
 ## Configuration Examples
 
@@ -249,6 +343,41 @@ The daemon:
 }
 ```
 
+### Docker Compose Project
+
+```jsonc
+{
+  "name": "compose-app",
+  "run": {
+    "image": "worklet/base:latest",
+    "composePath": "docker-compose.yml",
+    "credentials": {
+      "ssh": true
+    }
+  }
+}
+```
+
+### Private Repository Development
+
+```jsonc
+{
+  "name": "private-project",
+  "run": {
+    "image": "node:18",
+    "credentials": {
+      "ssh": true,      // Mount SSH for Git operations
+      "claude": true    // Mount Claude for AI assistance
+    },
+    "initScript": [
+      "git config --global user.name 'Your Name'",
+      "git config --global user.email 'your@email.com'",
+      "npm install"
+    ]
+  }
+}
+```
+
 ## Workflows
 
 ### Development Workflow
@@ -265,6 +394,22 @@ $ worklet run --mount npm run dev
 # Access your services:
 # - http://app.my-project-12345.worklet.sh
 # - http://api.my-project-12345.worklet.sh
+```
+
+### VSCode Integration Workflow
+
+```bash
+# Start a development session
+$ worklet run --mount
+
+# Open the session in VSCode
+$ worklet code
+
+# VSCode opens with:
+# - Full Dev Containers integration
+# - Your extensions automatically installed
+# - Terminal connected to the container
+# - Git integration working seamlessly
 ```
 
 ### Testing Workflow
@@ -290,6 +435,19 @@ $ worklet run ./scripts/ci.sh
 # See exactly what your CI server sees
 ```
 
+### SSH Setup for Private Repositories
+
+```bash
+# One-time setup: configure SSH credentials
+$ worklet ssh setup
+
+# Check SSH is working
+$ worklet ssh status
+
+# Now your containers can clone private repos
+$ worklet run git clone git@github.com:private/repo.git
+```
+
 ## Tips & Tricks
 
 ### Shell Aliases
@@ -312,6 +470,10 @@ alias wt='worklet terminal'
 2. **Mount Mode**: Use `--mount` for development, default mode for testing
 3. **Init Scripts**: Keep them minimal for faster container startup
 4. **Services**: Define all exposed ports for automatic discovery
+5. **Session Management**: Use the interactive CLI (`worklet`) to manage sessions
+6. **Cleanup**: Run `worklet cleanup` periodically to remove orphaned resources
+7. **SSH Setup**: Run `worklet ssh setup` once for seamless Git operations
+8. **VSCode**: Use `worklet code` for a full IDE experience with containers
 
 ## Architecture
 
