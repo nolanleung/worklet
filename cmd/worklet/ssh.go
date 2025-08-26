@@ -26,24 +26,52 @@ to work inside containers.`,
 
 var sshStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Check if SSH credentials are configured",
+	Short: "Check SSH credentials and test GitHub connectivity",
+	Long:  `Check if SSH credentials are configured and test connectivity to GitHub.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// First check if credentials exist
 		configured, err := docker.CheckSSHCredentials()
 		if err != nil {
 			return fmt.Errorf("failed to check SSH credentials: %w", err)
 		}
-
-		if configured {
-			fmt.Println("✓ SSH credentials are configured")
+		
+		if !configured {
+			fmt.Println("✗ SSH credentials are not configured")
+			fmt.Println("\nRun 'worklet ssh setup' to configure SSH credentials")
+			return nil
+		}
+		
+		fmt.Println("✓ SSH credentials volume is configured")
+		
+		// Test GitHub connectivity
+		fmt.Print("Testing GitHub SSH connectivity... ")
+		
+		connected, message, err := docker.TestSSHGitHub()
+		if err != nil {
+			fmt.Printf("\n⚠️  Error testing connection: %v\n", err)
+		} else if connected {
+			fmt.Printf("✓\n")
+			if message != "" {
+				fmt.Printf("  Authenticated as: %s\n", message)
+			}
+			fmt.Println("\n✅ SSH is properly configured for GitHub access")
 			fmt.Println("\nTo use SSH in your worklet containers, add this to your .worklet.jsonc:")
 			fmt.Println(`  "credentials": {
     "ssh": true
   }`)
 		} else {
-			fmt.Println("✗ SSH credentials are not configured")
-			fmt.Println("\nRun 'worklet ssh setup' to configure SSH credentials")
+			fmt.Printf("✗\n")
+			if message != "" {
+				fmt.Printf("  Error: %s\n", message)
+			}
+			fmt.Println("\n⚠️  SSH credentials exist but cannot connect to GitHub")
+			fmt.Println("  Please check:")
+			fmt.Println("  1. Your SSH key is added to your GitHub account")
+			fmt.Println("  2. Your SSH key has the correct permissions")
+			fmt.Println("  3. You have network connectivity to GitHub")
+			fmt.Println("\nYou may need to run 'worklet ssh setup' again with a working SSH key")
 		}
-
+		
 		return nil
 	},
 }

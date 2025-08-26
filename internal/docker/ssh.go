@@ -110,6 +110,78 @@ func CheckSSHCredentials() (bool, error) {
 	return strings.TrimSpace(string(output)) == "configured", nil
 }
 
+// TestSSHGitHub tests if SSH credentials can connect to GitHub
+func TestSSHGitHub() (bool, string, error) {
+	// Check if volume exists first
+	exists, err := VolumeExists(SSHCredentialsVolume)
+	if err != nil {
+		return false, "", err
+	}
+	if !exists {
+		return false, "SSH credentials volume not found", nil
+	}
+	
+	// Run a container with SSH credentials and test GitHub connection
+	// Using alpine/git image which has ssh client pre-installed
+	args := []string{
+		"run", "--rm",
+		"-v", fmt.Sprintf("%s:/ssh-config:ro", SSHCredentialsVolume),
+		"--entrypoint", "sh",
+		"alpine/git",
+		"-c",
+		`mkdir -p /root/.ssh && 
+		 cp -r /ssh-config/* /root/.ssh/ 2>/dev/null && 
+		 chmod 700 /root/.ssh && 
+		 chmod 600 /root/.ssh/id_* 2>/dev/null || true &&
+		 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -T git@github.com 2>&1 || true`,
+	}
+	
+	cmd := exec.Command("docker", args...)
+	output, _ := cmd.Output() // Ignore error as SSH returns 1 even on successful auth
+	
+	outputStr := strings.TrimSpace(string(output))
+	
+	// GitHub returns "Hi username! You've successfully authenticated..." on success
+	if strings.Contains(outputStr, "successfully authenticated") {
+		// Extract username if present
+		if strings.Contains(outputStr, "Hi ") {
+			parts := strings.Split(outputStr, "Hi ")
+			if len(parts) > 1 {
+				userPart := strings.Split(parts[1], "!")[0]
+				return true, userPart, nil
+			}
+		}
+		return true, "", nil
+	}
+	
+	// Check for permission denied (bad key or not added to GitHub)
+	if strings.Contains(outputStr, "Permission denied") {
+		return false, "Permission denied - SSH key not authorized for GitHub", nil
+	}
+	
+	// Check for timeout or connection issues
+	if strings.Contains(outputStr, "Connection timed out") || 
+	   strings.Contains(outputStr, "Could not resolve") {
+		return false, "Network error - could not reach GitHub", nil
+	}
+	
+	// Check for host key verification failure
+	if strings.Contains(outputStr, "Host key verification failed") {
+		return false, "Host key verification failed", nil
+	}
+	
+	// Other errors - return the actual message for debugging
+	if outputStr != "" {
+		// Truncate if too long
+		if len(outputStr) > 100 {
+			outputStr = outputStr[:100] + "..."
+		}
+		return false, outputStr, nil
+	}
+	
+	return false, "Unknown error", nil
+}
+
 // ClearSSHCredentials removes SSH credentials
 func ClearSSHCredentials() error {
 	exists, err := VolumeExists(SSHCredentialsVolume)
