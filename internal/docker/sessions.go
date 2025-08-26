@@ -153,19 +153,16 @@ func StopSession(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// RemoveSession removes a worklet session container
+// RemoveSession removes a worklet session and all associated resources
 func RemoveSession(ctx context.Context, sessionID string) error {
-	session, err := GetSessionInfo(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get session info: %w", err)
-	}
+	// Use comprehensive cleanup without force (preserves pnpm volumes)
+	return CleanupSession(ctx, sessionID, CleanupOptions{Force: false})
+}
 
-	cmd := exec.CommandContext(ctx, "docker", "rm", "-f", session.ContainerID)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to remove container: %w", err)
-	}
-
-	return nil
+// RemoveSessionForce removes a worklet session and ALL associated resources including pnpm volumes
+func RemoveSessionForce(ctx context.Context, sessionID string) error {
+	// Use comprehensive cleanup with force (removes everything)
+	return CleanupSession(ctx, sessionID, CleanupOptions{Force: true})
 }
 
 // AttachToSession attaches to a running session container

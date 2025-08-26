@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -123,13 +124,12 @@ func EnsureDevContainerConfig(containerID string, projectName string) error {
 		fmt.Printf("Warning: Could not create .devcontainer directory: %v\n", err)
 	}
 
-	// Write config to container using echo to avoid issues with stdin
-	escapedConfig := strings.ReplaceAll(config, `"`, `\"`)
-	escapedConfig = strings.ReplaceAll(escapedConfig, `$`, `\$`)
-	escapedConfig = strings.ReplaceAll(escapedConfig, "`", "\\`")
+	// Write config to container using a here-document approach for proper escaping
+	// Use base64 encoding to avoid any shell escaping issues
+	encodedConfig := base64.StdEncoding.EncodeToString([]byte(config))
 	
 	writeCmd := exec.Command("docker", "exec", containerID, "sh", "-c",
-		fmt.Sprintf(`echo '%s' > /workspace/.devcontainer/devcontainer.json`, escapedConfig))
+		fmt.Sprintf(`echo "%s" | base64 -d > /workspace/.devcontainer/devcontainer.json`, encodedConfig))
 	
 	if err := writeCmd.Run(); err != nil {
 		return fmt.Errorf("failed to write devcontainer config: %w", err)

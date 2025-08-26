@@ -43,6 +43,7 @@ func init() {
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(sshCmd)
 	rootCmd.AddCommand(codeCmd)
+	rootCmd.AddCommand(cleanupCmd)
 	rootCmd.AddCommand(versionCmd)
 }
 

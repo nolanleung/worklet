@@ -27,9 +27,11 @@ func max(a, b int) int {
 }
 
 type model struct {
-	table  table.Model
-	width  int
-	height int
+	table           table.Model
+	width           int
+	height          int
+	confirmDelete   string // Session ID to delete if confirmed
+	showConfirmation bool  // Whether we're showing confirmation dialog
 }
 
 // Init implements tea.Model.
@@ -160,6 +162,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "o", "O":
+			// Don't allow other actions during confirmation
+			if m.showConfirmation {
+				return m, nil
+			}
 			// open browser with the service URL
 			if !m.table.Focused() {
 				return m, nil
@@ -181,6 +187,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "l", "L":
+			// Don't allow other actions during confirmation
+			if m.showConfirmation {
+				return m, nil
+			}
 			// tail logs of the selected session
 			if !m.table.Focused() {
 				return m, nil
@@ -213,6 +223,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 
 		case "c", "C":
+			// Don't allow other actions during confirmation
+			if m.showConfirmation {
+				return m, nil
+			}
 			// open the selected session in VSCode
 			if !m.table.Focused() {
 				return m, nil
@@ -241,7 +255,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "d", "D":
+			// Delete the selected session - show confirmation
+			if m.showConfirmation {
+				// Already in confirmation mode, ignore
+				return m, nil
+			}
+			if !m.table.Focused() {
+				return m, nil
+			}
+			selected := m.table.SelectedRow()
+			if len(selected) == 0 {
+				return m, nil
+			}
+			sessionID := selected[1]
+			if sessionID == "" {
+				return m, nil
+			}
+
+			// Enter confirmation mode
+			m.confirmDelete = sessionID
+			m.showConfirmation = true
+			return m, nil
+
+		case "y", "Y":
+			// Confirm deletion if in confirmation mode
+			if m.showConfirmation && m.confirmDelete != "" {
+				// Perform comprehensive cleanup
+				if err := docker.RemoveSession(context.Background(), m.confirmDelete); err != nil {
+					// Log error but don't crash the TUI
+					// Could optionally show an error message
+				}
+
+				// Reset confirmation state
+				m.confirmDelete = ""
+				m.showConfirmation = false
+
+				// Refresh table to remove the deleted session
+				m.refresh()
+			}
+			return m, nil
+
+		case "n", "N", "escape":
+			// Cancel deletion if in confirmation mode
+			if m.showConfirmation {
+				m.confirmDelete = ""
+				m.showConfirmation = false
+			}
+			return m, nil
+
 		case "enter":
+			// Don't allow other actions during confirmation
+			if m.showConfirmation {
+				return m, nil
+			}
 			// attach to the selected project with direct terminal
 			if !m.table.Focused() {
 				return m, nil
@@ -297,18 +364,37 @@ func (m model) View() string {
 			Width(m.width - 2). // Account for terminal padding
 			Render(tableView)
 		
-		helpText := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("241")).
-			Width(m.width - 2).
-			Render("\nEnter: Attach to shell • O: Open in browser • C: Open in VSCode • L: View logs • Q: Quit")
+		var helpText string
+		if m.showConfirmation {
+			// Show confirmation prompt
+			confirmStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("196")). // Red color for warning
+				Bold(true).
+				Width(m.width - 2)
+			helpText = confirmStyle.Render(fmt.Sprintf("\n⚠️  Delete session %s? Press Y to confirm, N to cancel", m.confirmDelete))
+		} else {
+			// Show normal help text
+			helpText = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("241")).
+				Width(m.width - 2).
+				Render("\nEnter: Attach • O: Browser • C: VSCode • L: Logs • D: Delete • Q: Quit")
+		}
 		
 		return styledTable + helpText + "\n"
 	}
 	
 	// Fallback for when dimensions aren't set yet
-	helpText := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("241")).
-		Render("\nEnter: Attach to shell • O: Open in browser • C: Open in VSCode • L: View logs • Q: Quit")
+	var helpText string
+	if m.showConfirmation {
+		confirmStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")). // Red color for warning
+			Bold(true)
+		helpText = confirmStyle.Render(fmt.Sprintf("\n⚠️  Delete session %s? Press Y to confirm, N to cancel", m.confirmDelete))
+	} else {
+		helpText = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			Render("\nEnter: Attach • O: Browser • C: VSCode • L: Logs • D: Delete • Q: Quit")
+	}
 	return baseStyle.Render(tableView) + helpText + "\n"
 }
 
